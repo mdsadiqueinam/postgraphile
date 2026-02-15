@@ -52,7 +52,7 @@ pub(crate) enum Relkind {
     MaterializedView,
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub(crate) struct Column {
     pub table_name: String,
     pub name: String,
@@ -82,7 +82,7 @@ impl Column {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub(crate) struct Table {
     pub name: String,
     pub schema_name: String,
@@ -134,7 +134,7 @@ fn map_columns_to_table(tables: &Vec<Rc<RefCell<Table>>>, columns: Vec<Column>) 
 
 pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -> Vec<Table> {
     let client = pool.get().await.unwrap();
-    let mut tables: Vec<Rc<RefCell<Table>>> = client
+    let tables: Vec<Rc<RefCell<Table>>> = client
         .query(
             "SELECT
                 n.nspname AS schema_name,
@@ -155,7 +155,10 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
         .map(|r| Rc::new(RefCell::new(Table::from_row(r))))
         .collect();
 
-    let table_names: Vec<String> = tables.iter().map(|t| t.borrow().name.clone()).collect();
+    let table_names = tables
+        .iter()
+        .map(|t| t.borrow().name.clone())
+        .collect::<Vec<String>>();
 
     let columns = client
         .query(
@@ -184,5 +187,11 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
 
     map_columns_to_table(&tables, columns);
 
-    return tables.into_iter().map(|t| t.into_inner()).collect();
+    return tables
+        .into_iter()
+        .map(|t| {
+            let cell = Rc::try_unwrap(t).expect("Table still has multiple owners!");
+            cell.into_inner()
+        })
+        .collect();
 }
