@@ -1,4 +1,4 @@
-use std::sync::LazyLock;
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::LazyLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +54,7 @@ pub(crate) enum Relkind {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub(crate) struct Column {
+    pub table_name: String,
     pub name: String,
     pub comment: String,
     pub data_type: String,
@@ -63,13 +64,15 @@ pub(crate) struct Column {
 
 impl Column {
     pub fn form_row(row: &tokio_postgres::Row) -> Self {
-        let column_name = row.try_get::<_, String>(0).unwrap();
-        let comment = row.try_get::<_, String>(1).unwrap_or("".to_string());
-        let data_type = row.try_get::<_, String>(2).unwrap();
-        let nullable = row.try_get::<_, bool>(3).unwrap();
+        let table_name = row.try_get::<_, String>(0).unwrap();
+        let column_name = row.try_get::<_, String>(1).unwrap();
+        let nullable = row.try_get::<_, bool>(2).unwrap();
+        let data_type = row.try_get::<_, String>(3).unwrap();
+        let comment = row.try_get::<_, String>(4).unwrap_or("".to_string());
         let omit = Omit::new(&comment);
 
         return Self {
+            table_name,
             name: column_name,
             comment,
             data_type,
@@ -81,8 +84,8 @@ impl Column {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub(crate) struct Table {
+    pub name: String,
     pub schema_name: String,
-    pub object_name: String,
     pub relkind: Relkind,
     pub comment: String,
     pub columns: Vec<Column>,
@@ -92,14 +95,14 @@ pub(crate) struct Table {
 impl Table {
     pub fn from_row(row: &tokio_postgres::Row) -> Self {
         let schema_name = row.try_get::<_, String>(0).unwrap();
-        let object_name = row.try_get::<_, String>(1).unwrap();
+        let table_name = row.try_get::<_, String>(1).unwrap();
         let relkind_str = row.try_get::<_, String>(2).unwrap();
         let comment = row.try_get::<_, String>(3).unwrap_or("".to_string());
         let omit = Omit::new(&comment);
 
         return Self {
             schema_name,
-            object_name,
+            name: table_name,
             relkind: if relkind_str == "r" {
                 Relkind::Table
             } else {
@@ -110,15 +113,32 @@ impl Table {
             omit,
         };
     }
+
+    pub fn push_column(&mut self, column: Column) {
+        self.columns.push(column);
+    }
 }
 
-pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) {
+fn map_columns_to_table(tables: &Vec<Rc<RefCell<Table>>>, columns: Vec<Column>) {
+    let table_map: HashMap<String, Rc<RefCell<Table>>> = tables
+        .iter()
+        .map(|table| (table.borrow().name.clone(), table.clone()))
+        .collect();
+
+    for col in columns.into_iter() {
+        if let Some(table) = table_map.get(&col.table_name) {
+            table.borrow_mut().push_column(col);
+        }
+    }
+}
+
+pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -> Vec<Table> {
     let client = pool.get().await.unwrap();
-    let table_rows = client
+    let mut tables: Vec<Rc<RefCell<Table>>> = client
         .query(
             "SELECT
                 n.nspname AS schema_name,
-                c.relname AS object_name,
+                c.relname AS table_name,
                 c.relkind,
                 d.description AS comment
             FROM pg_class c
@@ -130,16 +150,39 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) {
             &[schemas],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .iter()
+        .map(|r| Rc::new(RefCell::new(Table::from_row(r))))
+        .collect();
 
-    let table_names: Vec<&str> = Vec::new();
+    let table_names: Vec<String> = tables.iter().map(|t| t.borrow().name.clone()).collect();
 
     let columns = client
         .query(
-            "SELECT * FROM information_schema.columns
-                WHERE table_schema = ANY($1) AND table_name   = ANY($2)",
+            "SELECT 
+                cols.table_name, 
+                cols.column_name, 
+                (cols.is_nullable = 'YES') AS nullable, 
+                cols.data_type, 
+                pg_catalog.col_description(c.oid, cols.ordinal_position::int) AS comment
+            FROM 
+                information_schema.columns AS cols
+            JOIN 
+                pg_class c ON c.relname = cols.table_name
+            JOIN 
+                pg_namespace n ON n.oid = c.relnamespace AND n.nspname = cols.table_schema
+            WHERE 
+                cols.table_schema = ANY($1)
+                AND cols.table_name = ANY($2);",
             &[schemas, &table_names],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .iter()
+        .map(|r| Column::form_row(r))
+        .collect::<Vec<Column>>();
+
+    map_columns_to_table(&tables, columns);
+
+    return tables.into_iter().map(|t| t.into_inner()).collect();
 }
