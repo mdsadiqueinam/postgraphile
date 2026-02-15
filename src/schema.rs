@@ -112,9 +112,9 @@ impl Table {
     }
 }
 
-pub async fn get_tables(client: &deadpool_postgres::Object) {
-    let schemas = vec!["public", "inventory", "sales"];
-    let rows = client
+pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) {
+    let client = pool.get().await.unwrap();
+    let table_rows = client
         .query(
             "SELECT
                 n.nspname AS schema_name,
@@ -126,9 +126,19 @@ pub async fn get_tables(client: &deadpool_postgres::Object) {
             LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
             WHERE c.relkind IN ('r', 'm')
             -- Filter by an array of schema names
-            AND n.nspname = ANY($1)
-            ORDER BY schema_name, type, object_name;",
-            &[&schemas],
+            AND n.nspname = ANY($1)",
+            &[schemas],
+        )
+        .await
+        .unwrap();
+
+    let table_names: Vec<&str> = Vec::new();
+
+    let columns = client
+        .query(
+            "SELECT * FROM information_schema.columns
+                WHERE table_schema = ANY($1) AND table_name   = ANY($2)",
+            &[schemas, &table_names],
         )
         .await
         .unwrap();
