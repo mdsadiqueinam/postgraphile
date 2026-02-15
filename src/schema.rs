@@ -119,22 +119,24 @@ impl Table {
     }
 }
 
-fn map_columns_to_table(tables: &Vec<Rc<RefCell<Table>>>, columns: Vec<Column>) {
-    let table_map: HashMap<String, Rc<RefCell<Table>>> = tables
-        .iter()
-        .map(|table| (table.borrow().name.clone(), table.clone()))
+fn map_columns_to_table(tables: Vec<Table>, columns: Vec<Column>) -> Vec<Table> {
+    let mut table_map: HashMap<String, Table> = tables
+        .into_iter()
+        .map(|table| (table.name.clone(), table))
         .collect();
 
     for col in columns.into_iter() {
-        if let Some(table) = table_map.get(&col.table_name) {
-            table.borrow_mut().push_column(col);
+        if let Some(table) = table_map.get_mut(&col.table_name) {
+            table.push_column(col);
         }
     }
+
+    return table_map.into_values().collect();
 }
 
 pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -> Vec<Table> {
     let client = pool.get().await.unwrap();
-    let tables: Vec<Rc<RefCell<Table>>> = client
+    let tables: Vec<Table> = client
         .query(
             "SELECT
                 n.nspname AS schema_name,
@@ -152,13 +154,10 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
         .await
         .unwrap()
         .iter()
-        .map(|r| Rc::new(RefCell::new(Table::from_row(r))))
+        .map(|r| Table::from_row(r))
         .collect();
 
-    let table_names = tables
-        .iter()
-        .map(|t| t.borrow().name.clone())
-        .collect::<Vec<String>>();
+    let table_names = tables.iter().map(|t| &t.name).collect::<Vec<&String>>();
 
     let columns = client
         .query(
@@ -185,13 +184,5 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
         .map(|r| Column::form_row(r))
         .collect::<Vec<Column>>();
 
-    map_columns_to_table(&tables, columns);
-
-    return tables
-        .into_iter()
-        .map(|t| {
-            let cell = Rc::try_unwrap(t).expect("Table still has multiple owners!");
-            cell.into_inner()
-        })
-        .collect();
+    return map_columns_to_table(tables, columns);
 }
