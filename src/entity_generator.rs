@@ -1,6 +1,6 @@
 use async_graphql::dynamic::{Field, FieldFuture, FieldValue, TypeRef};
 
-use crate::schema::{Column, Table};
+use crate::table::{Column, Table};
 
 fn generate_field(column: &Column) {
     Field::new(column.name, TypeRef::named_nn(TypeRef::STRING), |ctx| {

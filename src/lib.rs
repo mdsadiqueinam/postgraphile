@@ -1,6 +1,7 @@
 mod entity_generator;
 mod extensions;
 mod schema;
+mod table;
 mod utils;
 
 pub fn add(left: u64, right: u64) -> u64 {
