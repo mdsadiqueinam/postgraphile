@@ -9,14 +9,14 @@ use tokio_postgres::types::Type;
 /// from this struct false means it is not omitted, true means it is omitted
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct Omit {
-    pub create: bool,
-    pub read: bool,
-    pub update: bool,
-    pub delete: bool,
+    pub(crate) create: bool,
+    pub(crate) read: bool,
+    pub(crate) update: bool,
+    pub(crate) delete: bool,
 }
 
 impl Omit {
-    pub fn new(comment: &str) -> Self {
+    pub(crate) fn new(comment: &str) -> Self {
         static OMIT_REGEX: LazyLock<regex::Regex> =
             LazyLock::new(|| regex::Regex::new(r"@omit\s+([^\s]+)").unwrap());
 
@@ -53,16 +53,16 @@ pub(crate) enum Relkind {
 #[derive(Clone, Debug)]
 pub(crate) struct Column {
     pub(crate) id: u32,
-    pub table_oid: u32,
-    pub name: String,
-    pub comment: String,
-    pub r#type: Option<Type>,
-    pub nullable: bool,
-    pub omit: Omit,
+    pub(crate) table_oid: u32,
+    pub(crate) name: String,
+    pub(crate) comment: String,
+    pub(crate) r#type: Option<Type>,
+    pub(crate) nullable: bool,
+    pub(crate) omit: Omit,
 }
 
 impl Column {
-    pub fn form_row(row: &tokio_postgres::Row) -> Self {
+    pub(crate) fn form_row(row: &tokio_postgres::Row) -> Self {
         let table_oid = row.try_get::<_, u32>(0).unwrap();
         let column_id = row.try_get::<_, u32>(1).unwrap();
         let column_name = row.try_get::<_, String>(2).unwrap();
