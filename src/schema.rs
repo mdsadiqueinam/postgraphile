@@ -86,16 +86,17 @@ impl Column {
 #[derive(Clone, Debug)]
 pub(crate) struct Table {
     pub(crate) oid: u32,
-    pub name: String,
-    pub schema_name: String,
-    pub relkind: Relkind,
-    pub comment: String,
-    pub columns: Vec<Column>,
-    pub omit: Omit,
+    pub(crate) name: String,
+    pub(crate) schema_name: String,
+    pub(crate) relkind: Relkind,
+    pub(crate) comment: String,
+    pub(crate) columns: Vec<Column>,
+    pub(crate) omit: Omit,
 }
 
 impl Table {
-    pub fn from_row(row: &tokio_postgres::Row) -> Self {
+    pub(crate) fn from_row(row: &tokio_postgres::Row) -> Self {
+        let oid = row.try_get::<_, u32>(0).unwrap();
         let schema_name = row.try_get::<_, String>(0).unwrap();
         let table_name = row.try_get::<_, String>(1).unwrap();
         let relkind_str = row.try_get::<_, String>(2).unwrap();
@@ -103,6 +104,7 @@ impl Table {
         let omit = Omit::new(&comment);
 
         return Self {
+            oid,
             schema_name,
             name: table_name,
             relkind: if relkind_str == "r" {
@@ -116,7 +118,7 @@ impl Table {
         };
     }
 
-    pub fn push_column(&mut self, column: Column) {
+    pub(crate) fn push_column(&mut self, column: Column) {
         self.columns.push(column);
     }
 }
@@ -136,7 +138,10 @@ fn map_columns_to_table(tables: Vec<Table>, columns: Vec<Column>) -> Vec<Table> 
     return table_map.into_values().collect();
 }
 
-pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -> Vec<Table> {
+pub(crate) async fn get_tables(
+    pool: &deadpool_postgres::Pool,
+    schemas: &Vec<String>,
+) -> Vec<Table> {
     let client = pool.get().await.unwrap();
     let tables: Vec<Table> = client
         .query(
@@ -145,12 +150,11 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
                 n.nspname AS schema_name,
                 c.relname AS table_name,
                 c.relkind,
-                d.description AS comment
+                pg_catalog.obj_description(c.oid, 'pg_class') AS comment
             FROM pg_catalog.pg_class c
-            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-            LEFT JOIN pg_catalog.pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace     -- To filter schema
             WHERE n.nspname = ANY($1)
-            AND c.relkind IN ('r', 'm') -- 'r' = ordinary table, 'm' = materialized view
+            AND c.relkind IN ('r', 'm')
             ORDER BY n.nspname, c.relname;",
             &[schemas],
         )
@@ -165,26 +169,21 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
     let columns = client
         .query(
             "SELECT 
-                c.oid AS table_oid, 
+                a.attrelid AS table_oid, 
                 a.attnum AS column_id,
                 a.attname AS column_name, 
                 a.atttypid AS type_oid, 
                 NOT a.attnotnull AS nullable,
-                pg_catalog.col_description(c.oid, a.attnum) AS comment
+                pg_catalog.col_description(a.attrelid, a.attnum) AS comment
             FROM 
                 pg_catalog.pg_attribute a
-            JOIN 
-                pg_catalog.pg_class c ON c.oid = a.attrelid
-            JOIN 
-                pg_catalog.pg_namespace n ON n.oid = c.relnamespace
             WHERE 
-                n.nspname = 'public'                     -- Your schema $1
-                AND c.relname = 'postgres_type_showcase' -- Your table $2
+                a.attrelid = $1              -- Your Table OID
                 AND a.attnum > 0 
                 AND NOT a.attisdropped
             ORDER BY 
                 a.attnum;",
-            &[schemas, &table_names],
+            &[&table_names],
         )
         .await
         .unwrap()
