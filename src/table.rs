@@ -85,6 +85,10 @@ impl Column {
     pub fn table_oid(&self) -> &u32 {
         &self.table_oid
     }
+
+    pub fn name(&self) -> &String {
+        &self.name
+    }
 }
 
 #[derive(Clone, Debug)]
