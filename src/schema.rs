@@ -46,37 +46,37 @@ impl Omit {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Relkind {
-    #[serde(rename = "r")]
     Table,
-    #[serde(rename = "m")]
     MaterializedView,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Column {
-    pub(crate) oid: u32,
+    pub(crate) id: u32,
     pub table_oid: u32,
     pub name: String,
     pub comment: String,
-    pub r#type: Type,
+    pub r#type: Option<Type>,
     pub nullable: bool,
     pub omit: Omit,
 }
 
 impl Column {
     pub fn form_row(row: &tokio_postgres::Row) -> Self {
-        let table_name = row.try_get::<_, String>(0).unwrap();
-        let column_name = row.try_get::<_, String>(1).unwrap();
-        let nullable = row.try_get::<_, bool>(2).unwrap();
-        let data_type = row.try_get::<_, String>(3).unwrap();
-        let comment = row.try_get::<_, String>(4).unwrap_or("".to_string());
+        let table_oid = row.try_get::<_, u32>(0).unwrap();
+        let column_id = row.try_get::<_, u32>(1).unwrap();
+        let column_name = row.try_get::<_, String>(2).unwrap();
+        let type_oid = row.try_get::<_, u32>(3).unwrap();
+        let nullable = row.try_get::<_, bool>(4).unwrap();
+        let comment = row.try_get::<_, String>(5).unwrap_or("".to_string());
         let omit = Omit::new(&comment);
 
         return Self {
-            table_name,
+            id: column_id,
+            table_oid,
             name: column_name,
             comment,
-            data_type,
+            r#type: Type::from_oid(type_oid),
             nullable,
             omit,
         };
@@ -124,13 +124,13 @@ impl Table {
 }
 
 fn map_columns_to_table(tables: Vec<Table>, columns: Vec<Column>) -> Vec<Table> {
-    let mut table_map: HashMap<String, Table> = tables
+    let mut table_map: HashMap<u32, Table> = tables
         .into_iter()
-        .map(|table| (table.name.clone(), table))
+        .map(|table| (table.oid.clone(), table))
         .collect();
 
     for col in columns.into_iter() {
-        if let Some(table) = table_map.get_mut(&col.table_name) {
+        if let Some(table) = table_map.get_mut(&col.table_oid) {
             table.push_column(col);
         }
     }
@@ -146,7 +146,7 @@ pub(crate) async fn get_tables(
     let tables: Vec<Table> = client
         .query(
             "SELECT 
-                c.oid AS table_oid, 
+                c.oid, 
                 n.nspname AS schema_name,
                 c.relname AS table_name,
                 c.relkind,
@@ -164,7 +164,7 @@ pub(crate) async fn get_tables(
         .map(|r| Table::from_row(r))
         .collect();
 
-    let table_names = tables.iter().map(|t| &t.name).collect::<Vec<&String>>();
+    let table_oids = tables.iter().map(|t| &t.oid).collect::<Vec<&u32>>();
 
     let columns = client
         .query(
@@ -178,12 +178,12 @@ pub(crate) async fn get_tables(
             FROM 
                 pg_catalog.pg_attribute a
             WHERE 
-                a.attrelid = $1              -- Your Table OID
+                a.attrelid = ANY($1)              -- Your Table OID
                 AND a.attnum > 0 
                 AND NOT a.attisdropped
             ORDER BY 
                 a.attnum;",
-            &[&table_names],
+            &[&table_oids],
         )
         .await
         .unwrap()
