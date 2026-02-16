@@ -1,6 +1,6 @@
-use std::{collections::HashMap, sync::LazyLock};
-
 use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, sync::LazyLock};
+use tokio_postgres::types::Type;
 
 /// Omit is used to determine which operations (create, read, update, delete) should be omitted for a given table or column based on its comment.
 /// The comment can contain an @omit annotation followed by a comma-separated list of operations to omit. For example:
@@ -44,7 +44,7 @@ impl Omit {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Relkind {
     #[serde(rename = "r")]
     Table,
@@ -52,12 +52,13 @@ pub(crate) enum Relkind {
     MaterializedView,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Column {
-    pub table_name: String,
+    pub(crate) oid: u32,
+    pub table_oid: u32,
     pub name: String,
     pub comment: String,
-    pub data_type: String,
+    pub r#type: Type,
     pub nullable: bool,
     pub omit: Omit,
 }
@@ -82,8 +83,9 @@ impl Column {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Table {
+    pub(crate) oid: u32,
     pub name: String,
     pub schema_name: String,
     pub relkind: Relkind,
@@ -138,17 +140,18 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
     let client = pool.get().await.unwrap();
     let tables: Vec<Table> = client
         .query(
-            "SELECT
+            "SELECT 
+                c.oid AS table_oid, 
                 n.nspname AS schema_name,
                 c.relname AS table_name,
                 c.relkind,
                 d.description AS comment
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
-            WHERE c.relkind IN ('r', 'm')
-            -- Filter by an array of schema names
-            AND n.nspname = ANY($1)",
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_catalog.pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+            WHERE n.nspname = ANY($1)
+            AND c.relkind IN ('r', 'm') -- 'r' = ordinary table, 'm' = materialized view
+            ORDER BY n.nspname, c.relname;",
             &[schemas],
         )
         .await
@@ -162,20 +165,25 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
     let columns = client
         .query(
             "SELECT 
-                cols.table_name, 
-                cols.column_name, 
-                (cols.is_nullable = 'YES') AS nullable, 
-                cols.data_type, 
-                pg_catalog.col_description(c.oid, cols.ordinal_position::int) AS comment
+                c.oid AS table_oid, 
+                a.attnum AS column_id,
+                a.attname AS column_name, 
+                a.atttypid AS type_oid, 
+                NOT a.attnotnull AS nullable,
+                pg_catalog.col_description(c.oid, a.attnum) AS comment
             FROM 
-                information_schema.columns AS cols
+                pg_catalog.pg_attribute a
             JOIN 
-                pg_class c ON c.relname = cols.table_name
+                pg_catalog.pg_class c ON c.oid = a.attrelid
             JOIN 
-                pg_namespace n ON n.oid = c.relnamespace AND n.nspname = cols.table_schema
+                pg_catalog.pg_namespace n ON n.oid = c.relnamespace
             WHERE 
-                cols.table_schema = ANY($1)
-                AND cols.table_name = ANY($2);",
+                n.nspname = 'public'                     -- Your schema $1
+                AND c.relname = 'postgres_type_showcase' -- Your table $2
+                AND a.attnum > 0 
+                AND NOT a.attisdropped
+            ORDER BY 
+                a.attnum;",
             &[schemas, &table_names],
         )
         .await
