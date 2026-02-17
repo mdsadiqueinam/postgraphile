@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::sync::Arc;
 
 use crate::table::{Column, Table};
 use async_graphql::dynamic::{Field, FieldFuture, FieldValue, TypeRef};
@@ -23,9 +23,8 @@ fn get_field_value<'a>(column: &Column, value: &serde_json::Value) -> Option<Fie
     }
 }
 
-fn generate_field(column: &Column) {
+fn generate_field<'a>(column: Arc<Column>) {
     let column = column.clone();
-
     Field::new(
         column.name().clone(),
         TypeRef::named_nn(TypeRef::STRING),
