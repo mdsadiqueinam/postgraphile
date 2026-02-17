@@ -56,7 +56,7 @@ pub struct Column {
     table_oid: u32,
     name: String,
     comment: String,
-    r#type: Option<Type>,
+    r#type: Type,
     nullable: bool,
     omit: Omit,
 }
@@ -69,6 +69,7 @@ impl Column {
         let type_oid = row.try_get::<_, u32>(3).unwrap();
         let nullable = row.try_get::<_, bool>(4).unwrap();
         let comment = row.try_get::<_, String>(5).unwrap_or("".to_string());
+        let data_type = Type::from_oid(type_oid).expect("Data type is not supported");
         let omit = Omit::new(&comment);
 
         return Self {
@@ -76,7 +77,7 @@ impl Column {
             table_oid,
             name: column_name,
             comment,
-            r#type: Type::from_oid(type_oid),
+            r#type: data_type,
             nullable,
             omit,
         };
@@ -88,6 +89,10 @@ impl Column {
 
     pub fn name(&self) -> &String {
         &self.name
+    }
+
+    pub fn _type(&self) -> &Type {
+        &self.r#type
     }
 }
 
