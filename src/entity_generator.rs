@@ -23,15 +23,23 @@ fn get_field_value<'a>(column: &Column, value: &serde_json::Value) -> Option<Fie
     }
 }
 
-fn generate_field<'a>(column: &Column) {
-    Field::new(column.name(), TypeRef::named_nn(TypeRef::STRING), |ctx| {
-        FieldFuture::new(async move {
-            // Ok(FieldValue::none())
-            let parent_value = ctx.parent_value.try_downcast_ref::<serde_json::Value>()?;
-            let field_value = get_field_value(column, parent_value);
-            Ok(field_value)
-        })
-    });
+fn generate_field(column: &Column) {
+    let column = column.clone();
+
+    Field::new(
+        column.name().clone(),
+        TypeRef::named_nn(TypeRef::STRING),
+        move |ctx| {
+            let column = column.clone();
+
+            FieldFuture::new(async move {
+                // Ok(FieldValue::none())
+                let parent_value = ctx.parent_value.try_downcast_ref::<serde_json::Value>()?;
+                let field_value = get_field_value(&column, parent_value);
+                Ok(field_value)
+            })
+        },
+    );
 }
 
 pub fn generate_entity(table: &Table) {}
