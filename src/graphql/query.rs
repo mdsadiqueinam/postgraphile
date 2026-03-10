@@ -5,7 +5,7 @@ use async_graphql::dynamic::{
     Enum, EnumItem, Field, FieldFuture, FieldValue, InputObject, InputValue, TypeRef,
 };
 use deadpool_postgres::Pool;
-use tokio_postgres::types::ToSql;
+use tokio_postgres::types::{ToSql, Type};
 
 use crate::db::JsonListExt;
 use crate::table::Table;
@@ -14,10 +14,76 @@ use crate::utils::inflection::to_pascal_case;
 use super::sql_scalar::SqlScalar;
 use super::type_mapping::{condition_type_ref, to_sql_scalar};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilterOp {
+    Eq,
+    NotEqual,
+    In,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+fn parse_filter_op_key(key: &str) -> Option<FilterOp> {
+    match key {
+        "equal" => Some(FilterOp::Eq),
+        "notEqual" => Some(FilterOp::NotEqual),
+        "in" => Some(FilterOp::In),
+        "greaterThan" => Some(FilterOp::Gt),
+        "greaterThanEqual" => Some(FilterOp::Gte),
+        "lessThan" => Some(FilterOp::Lt),
+        "lessThanEqual" => Some(FilterOp::Lte),
+        _ => None,
+    }
+}
+
+fn supports_range(column_type: &Type) -> bool {
+    matches!(
+        *column_type,
+        Type::INT2 | Type::INT4 | Type::INT8 | Type::FLOAT4 | Type::FLOAT8
+    )
+}
+
 /// Builds the `{TypeName}Condition` input object (equality filters per column).
+/// Exported so callers can register it with the schema separately.
+pub fn make_condition_filter_types(table: &Table) -> Vec<InputObject> {
+    table
+        .columns()
+        .iter()
+        .filter(|c| !c.omit_read())
+        .filter_map(|col| {
+            condition_type_ref(col).map(|tr| {
+                let scalar_name = tr.to_string();
+                let filter_name =
+                    format!("{}{}Filter", table.type_name(), to_pascal_case(col.name()));
+                let mut input = InputObject::new(filter_name)
+                    .field(InputValue::new("equal", tr.clone()))
+                    .field(InputValue::new("notEqual", tr.clone()))
+                    .field(InputValue::new("in", TypeRef::named_list(scalar_name)));
+
+                if supports_range(col._type()) {
+                    input = input
+                        .field(InputValue::new("greaterThan", tr.clone()))
+                        .field(InputValue::new("greaterThanEqual", tr.clone()))
+                        .field(InputValue::new("lessThan", tr.clone()))
+                        .field(InputValue::new("lessThen", tr.clone()))
+                        .field(InputValue::new("lessThanEqual", tr.clone()))
+                        .field(InputValue::new("lessThenEqual", tr));
+                }
+
+                input
+            })
+        })
+        .collect()
+}
+
+/// Builds the `{TypeName}Condition` input object (per-column operator filters).
 /// Exported so callers can register it with the schema separately.
 pub fn make_condition_type(table: &Table) -> InputObject {
     let name = format!("{}Condition", table.type_name());
+    let filter_types = make_condition_filter_types(table);
+
     table
         .columns()
         .iter()
@@ -25,7 +91,18 @@ pub fn make_condition_type(table: &Table) -> InputObject {
         .fold(
             InputObject::new(name),
             |obj, col| match condition_type_ref(col) {
-                Some(tr) => obj.field(InputValue::new(col.name().as_str(), tr)),
+                Some(_) => {
+                    let filter_name =
+                        format!("{}{}Filter", table.type_name(), to_pascal_case(col.name()));
+                    if filter_types.iter().any(|f| f.type_name() == filter_name) {
+                        obj.field(InputValue::new(
+                            col.name().as_str(),
+                            TypeRef::named(filter_name),
+                        ))
+                    } else {
+                        obj
+                    }
+                }
                 None => obj,
             },
         )
@@ -55,6 +132,8 @@ pub struct GeneratedQuery {
     pub query_field: Field,
     /// The `{T}Condition` input type — must be registered with the schema.
     pub condition_type: InputObject,
+    /// Per-column filter input objects referenced by `{T}Condition`.
+    pub condition_filter_types: Vec<InputObject>,
     /// The `{T}OrderBy` enum — must be registered with the schema.
     pub order_by_enum: Enum,
 }
@@ -71,6 +150,7 @@ pub struct GeneratedQuery {
 /// ): [User!]!
 /// ```
 pub fn generate_query(table: Arc<Table>, pool: Arc<Pool>) -> GeneratedQuery {
+    let condition_filter_types = make_condition_filter_types(&table);
     let condition_type = make_condition_type(&table);
     let order_by_enum = make_order_by_enum(&table);
 
@@ -123,13 +203,85 @@ pub fn generate_query(table: Arc<Table>, pool: Arc<Pool>) -> GeneratedQuery {
                         else {
                             continue;
                         };
-                        if let Some(scalar) = to_sql_scalar(col, &gql_val) {
-                            where_clauses.push(format!(
-                                "\"{}\" = ${}",
-                                col.name(),
-                                params.len() + 1
-                            ));
-                            params.push(scalar);
+
+                        // Backward-compatible shortcut: scalar means equality.
+                        if !matches!(gql_val, GqlValue::Object(_)) {
+                            if let Some(scalar) = to_sql_scalar(col, &gql_val) {
+                                where_clauses.push(format!(
+                                    "\"{}\" = ${}",
+                                    col.name(),
+                                    params.len() + 1
+                                ));
+                                params.push(scalar);
+                            }
+                            continue;
+                        }
+
+                        if let GqlValue::Object(op_obj) = gql_val {
+                            for (op_key, op_val) in op_obj {
+                                let Some(op) = parse_filter_op_key(op_key.as_str()) else {
+                                    continue;
+                                };
+
+                                match op {
+                                    FilterOp::Eq
+                                    | FilterOp::NotEqual
+                                    | FilterOp::Gt
+                                    | FilterOp::Gte
+                                    | FilterOp::Lt
+                                    | FilterOp::Lte => {
+                                        if matches!(
+                                            op,
+                                            FilterOp::Gt
+                                                | FilterOp::Gte
+                                                | FilterOp::Lt
+                                                | FilterOp::Lte
+                                        ) && !supports_range(col._type())
+                                        {
+                                            continue;
+                                        }
+
+                                        if let Some(scalar) = to_sql_scalar(col, &op_val) {
+                                            let sql_op = match op {
+                                                FilterOp::Eq => "=",
+                                                FilterOp::NotEqual => "<>",
+                                                FilterOp::Gt => ">",
+                                                FilterOp::Gte => ">=",
+                                                FilterOp::Lt => "<",
+                                                FilterOp::Lte => "<=",
+                                                FilterOp::In => unreachable!(),
+                                            };
+                                            where_clauses.push(format!(
+                                                "\"{}\" {} ${}",
+                                                col.name(),
+                                                sql_op,
+                                                params.len() + 1
+                                            ));
+                                            params.push(scalar);
+                                        }
+                                    }
+                                    FilterOp::In => {
+                                        if let GqlValue::List(values) = op_val {
+                                            let mut local_placeholders = Vec::<String>::new();
+                                            for val in values {
+                                                if let Some(scalar) = to_sql_scalar(col, &val) {
+                                                    local_placeholders
+                                                        .push(format!("${}", params.len() + 1));
+                                                    params.push(scalar);
+                                                }
+                                            }
+
+                                            if !local_placeholders.is_empty() {
+                                                where_clauses.push(format!(
+                                                    "\"{}\" IN ({})",
+                                                    col.name(),
+                                                    local_placeholders.join(", ")
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -213,6 +365,7 @@ pub fn generate_query(table: Arc<Table>, pool: Arc<Pool>) -> GeneratedQuery {
     GeneratedQuery {
         query_field,
         condition_type,
+        condition_filter_types,
         order_by_enum,
     }
 }
@@ -221,6 +374,7 @@ pub fn generate_query(table: Arc<Table>, pool: Arc<Pool>) -> GeneratedQuery {
 mod tests {
     use super::*;
     use crate::table::Table;
+    use tokio_postgres::types::Type;
 
     #[test]
     fn test_condition_type_name() {
@@ -244,5 +398,44 @@ mod tests {
     fn test_order_by_enum_name_users() {
         let table = Table::new_for_test("users", vec![]);
         assert_eq!(make_order_by_enum(&table).type_name(), "UserOrderBy");
+    }
+
+    #[test]
+    fn test_parse_filter_op_key_not_equal() {
+        assert_eq!(parse_filter_op_key("notEqual"), Some(FilterOp::NotEqual));
+    }
+
+    #[test]
+    fn test_parse_filter_op_key_range() {
+        assert_eq!(parse_filter_op_key("greaterThanEqual"), Some(FilterOp::Gte));
+        assert_eq!(parse_filter_op_key("lessThan"), Some(FilterOp::Lt));
+    }
+
+    #[test]
+    fn test_parse_filter_op_key_less_then_alias() {
+        assert_eq!(parse_filter_op_key("lessThen"), Some(FilterOp::Lt));
+        assert_eq!(parse_filter_op_key("lessThenEqual"), Some(FilterOp::Lte));
+    }
+
+    #[test]
+    fn test_parse_filter_op_key_default_eq() {
+        assert_eq!(parse_filter_op_key("equal"), Some(FilterOp::Eq));
+    }
+
+    #[test]
+    fn test_parse_filter_op_key_unknown() {
+        assert_eq!(parse_filter_op_key("between"), None);
+    }
+
+    #[test]
+    fn test_supports_range_for_numeric() {
+        assert!(supports_range(&Type::INT4));
+        assert!(supports_range(&Type::FLOAT8));
+    }
+
+    #[test]
+    fn test_supports_range_for_non_numeric() {
+        assert!(!supports_range(&Type::TEXT));
+        assert!(!supports_range(&Type::BOOL));
     }
 }
