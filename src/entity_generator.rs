@@ -23,7 +23,7 @@ fn get_field_value<'a>(column: &Column, value: &serde_json::Value) -> Option<Fie
     }
 }
 
-fn generate_field<'a>(column: Arc<Column>) {
+fn generate_field(column: Arc<Column>) {
     let column = column.clone();
     Field::new(
         column.name().clone(),
@@ -41,4 +41,4 @@ fn generate_field<'a>(column: Arc<Column>) {
     );
 }
 
-pub fn generate_entity(table: &Table) {}
+pub fn generate_entity(table: Arc<Table>) {}
