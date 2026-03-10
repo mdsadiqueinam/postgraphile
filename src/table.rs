@@ -181,6 +181,10 @@ impl Table {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    pub fn schema_name(&self) -> &str {
+        &self.schema_name
+    }
 }
 
 #[cfg(test)]

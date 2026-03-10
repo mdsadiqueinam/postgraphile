@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use crate::extensions::JsonListExt;
 use crate::table::{Column, Table};
-use crate::utils::inflection::{singularize, to_pascal_case};
+use crate::utils::inflection::{singularize, to_camel_case, to_pascal_case};
 use async_graphql::dynamic::{Field, FieldFuture, FieldValue, Object, TypeRef};
+use deadpool_postgres::Pool;
 use tokio_postgres::types::Type;
 
 fn get_field_value<'a>(column: &Column, value: &serde_json::Value) -> Option<FieldValue<'a>> {
@@ -131,6 +133,49 @@ pub fn generate_entity(table: Arc<Table>) -> Object {
         .fold(obj, |obj, col| {
             obj.field(generate_field(Arc::new(col.clone())))
         })
+}
+
+/// Generates a root Query field (e.g. `allUsers`) that fetches every row from
+/// the backing table and returns them as a list of the entity type.  Each row
+/// is converted to a `serde_json::Value` so the entity field resolvers can
+/// extract individual column values via `get_field_value`.
+pub fn generate_query_field(table: Arc<Table>, pool: Arc<Pool>) -> Field {
+    let type_name = to_pascal_case(&singularize(table.name()));
+    // field name: allBlogPosts, allUsers, …
+    let field_name = format!("all{}", to_pascal_case(table.name()));
+    let schema = table.schema_name().to_string();
+    let tbl = table.name().to_string();
+
+    Field::new(
+        field_name,
+        TypeRef::named_nn_list_nn(type_name),
+        move |_ctx| {
+            let pool = pool.clone();
+            let schema = schema.clone();
+            let tbl = tbl.clone();
+
+            FieldFuture::new(async move {
+                let client = pool
+                    .get()
+                    .await
+                    .map_err(|e| async_graphql::Error::new(format!("DB pool error: {e}")))?;
+
+                let sql = format!("SELECT * FROM \"{schema}\".\"{tbl}\"");
+                let rows = client
+                    .query(sql.as_str(), &[])
+                    .await
+                    .map_err(|e| async_graphql::Error::new(format!("DB query error: {e}")))?;
+
+                let json_rows = rows.to_json_list();
+                let values = json_rows
+                    .into_iter()
+                    .map(|row| FieldValue::owned_any(row))
+                    .collect::<Vec<_>>();
+
+                Ok(Some(FieldValue::list(values)))
+            })
+        },
+    )
 }
 
 #[cfg(test)]
