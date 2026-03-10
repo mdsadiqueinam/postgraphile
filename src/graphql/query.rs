@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use async_graphql::Value as GqlValue;
 use async_graphql::dynamic::{
-    Enum, EnumItem, Field, FieldFuture, FieldValue, InputObject, InputValue, TypeRef,
+    Enum, EnumItem, Field, FieldFuture, FieldValue, InputObject, InputValue, Object, TypeRef,
 };
+use base64::Engine;
 use deadpool_postgres::Pool;
 use tokio_postgres::types::{ToSql, Type};
 
@@ -85,7 +86,12 @@ pub fn make_condition_filter_types(table: &Table) -> Vec<InputObject> {
             condition_type_ref(col).map(|tr| {
                 let scalar_name = tr.to_string();
                 let filter_name =
-                    format!("{}{}Filter", table.type_name(), to_pascal_case(col.name()));
+                    format!("{}{}Filter", table.type_name(), to_pascal_case(col.name())); // e.g. UserEmailFilter
+
+                // example generated input object for a "email" column of type String:
+                // input UserEmailFilter {
+                //   equal: String
+                // }
                 let mut input = InputObject::new(filter_name)
                     .field(InputValue::new("equal", tr.clone()))
                     .field(InputValue::new("notEqual", tr.clone()))
@@ -146,6 +152,168 @@ pub fn make_order_by_enum(table: &Table) -> Enum {
         .fold(Enum::new(name), |e, item| e.item(item))
 }
 
+// ── Relay-style connection payloads ──────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+struct EdgePayload {
+    cursor: String,
+    node: serde_json::Value,
+}
+
+#[derive(Clone, Debug)]
+struct ConnectionPayload {
+    total_count: i64,
+    has_next_page: bool,
+    has_previous_page: bool,
+    edges: Vec<EdgePayload>,
+}
+
+fn encode_cursor(order_by: &[String], abs_index: usize) -> String {
+    let json = if order_by.is_empty() {
+        serde_json::json!([abs_index + 1])
+    } else {
+        let keys: Vec<String> = order_by.iter().map(|s| s.to_lowercase()).collect();
+        serde_json::json!([keys, abs_index + 1])
+    };
+    base64::engine::general_purpose::STANDARD.encode(json.to_string())
+}
+
+// ── Shared PageInfo type (register once globally) ───────────────────────────
+
+pub fn make_page_info_type() -> Object {
+    Object::new("PageInfo")
+        .field(Field::new(
+            "hasNextPage",
+            TypeRef::named_nn(TypeRef::BOOLEAN),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
+                    Ok(Some(FieldValue::value(payload.has_next_page)))
+                })
+            },
+        ))
+        .field(Field::new(
+            "hasPreviousPage",
+            TypeRef::named_nn(TypeRef::BOOLEAN),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
+                    Ok(Some(FieldValue::value(payload.has_previous_page)))
+                })
+            },
+        ))
+        .field(Field::new(
+            "startCursor",
+            TypeRef::named(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
+                    let val = payload
+                        .edges
+                        .first()
+                        .map(|e| FieldValue::value(e.cursor.clone()));
+                    Ok(val)
+                })
+            },
+        ))
+        .field(Field::new(
+            "endCursor",
+            TypeRef::named(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
+                    let val = payload
+                        .edges
+                        .last()
+                        .map(|e| FieldValue::value(e.cursor.clone()));
+                    Ok(val)
+                })
+            },
+        ))
+}
+
+// ── Per-table Connection + Edge types ───────────────────────────────────────
+
+pub fn make_connection_types(table: &Table) -> (Object, Object) {
+    let type_name = table.type_name();
+    let edge_type_name = format!("{}Edge", type_name);
+    let connection_type_name = format!("{}Connection", type_name);
+
+    let node_type = type_name.clone();
+    let edge = Object::new(&edge_type_name)
+        .field(Field::new(
+            "cursor",
+            TypeRef::named_nn(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let edge = ctx.parent_value.try_downcast_ref::<EdgePayload>()?;
+                    Ok(Some(FieldValue::value(edge.cursor.clone())))
+                })
+            },
+        ))
+        .field(Field::new("node", TypeRef::named_nn(node_type), |ctx| {
+            FieldFuture::new(async move {
+                let edge = ctx.parent_value.try_downcast_ref::<EdgePayload>()?;
+                Ok(Some(FieldValue::owned_any(edge.node.clone())))
+            })
+        }));
+
+    let edge_ref = edge_type_name.clone();
+    let connection = Object::new(&connection_type_name)
+        .field(Field::new(
+            "totalCount",
+            TypeRef::named_nn(TypeRef::INT),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
+                    Ok(Some(FieldValue::value(payload.total_count as i32)))
+                })
+            },
+        ))
+        .field(Field::new(
+            "pageInfo",
+            TypeRef::named_nn("PageInfo"),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
+                    Ok(Some(FieldValue::owned_any(payload.clone())))
+                })
+            },
+        ))
+        .field(Field::new(
+            "edges",
+            TypeRef::named_nn_list_nn(edge_ref),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
+                    let list: Vec<FieldValue> = payload
+                        .edges
+                        .iter()
+                        .map(|e| FieldValue::owned_any(e.clone()))
+                        .collect();
+                    Ok(Some(FieldValue::list(list)))
+                })
+            },
+        ))
+        .field(Field::new(
+            "nodes",
+            TypeRef::named_nn_list_nn(type_name),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
+                    let list: Vec<FieldValue> = payload
+                        .edges
+                        .iter()
+                        .map(|e| FieldValue::owned_any(e.node.clone()))
+                        .collect();
+                    Ok(Some(FieldValue::list(list)))
+                })
+            },
+        ));
+
+    (connection, edge)
+}
+
 /// Everything the schema builder needs for one table.
 pub struct GeneratedQuery {
     /// The root Query field (e.g. `allUsers`).
@@ -156,6 +324,10 @@ pub struct GeneratedQuery {
     pub condition_filter_types: Vec<InputObject>,
     /// The `{T}OrderBy` enum — must be registered with the schema.
     pub order_by_enum: Enum,
+    /// The `{T}Connection` object type — must be registered with the schema.
+    pub connection_type: Object,
+    /// The `{T}Edge` object type — must be registered with the schema.
+    pub edge_type: Object,
 }
 
 /// Generates a root Query field (e.g. `allUsers`) with PostGraphile-style
@@ -167,14 +339,15 @@ pub struct GeneratedQuery {
 ///   orderBy:   UserOrderBy     # [COLUMN_ASC] / [COLUMN_DESC]
 ///   first:     Int             # LIMIT
 ///   offset:    Int             # OFFSET
-/// ): [User!]!
+/// ): UserConnection!
 /// ```
 pub fn generate_query(table: Arc<Table>, pool: Arc<Pool>) -> GeneratedQuery {
     let condition_filter_types = make_condition_filter_types(&table);
     let condition_type = make_condition_type(&table);
     let order_by_enum = make_order_by_enum(&table);
+    let (connection_type, edge_type) = make_connection_types(&table);
 
-    let type_name = table.type_name();
+    let connection_type_name = connection_type.type_name().to_string();
     let condition_type_name = condition_type.type_name().to_string();
     let order_by_type_name = order_by_enum.type_name().to_string();
     let field_name = format!("all{}", to_pascal_case(table.name()));
@@ -201,7 +374,7 @@ pub fn generate_query(table: Arc<Table>, pool: Arc<Pool>) -> GeneratedQuery {
 
     let query_field = Field::new(
         field_name,
-        TypeRef::named_nn_list_nn(type_name),
+        TypeRef::named_nn(connection_type_name),
         move |ctx| {
             let condition_pairs: Option<Vec<(String, GqlValue)>> = ctx
                 .args
@@ -235,22 +408,37 @@ pub fn generate_query(table: Arc<Table>, pool: Arc<Pool>) -> GeneratedQuery {
             let col_by_upper = col_by_upper.clone();
 
             FieldFuture::new(async move {
-                let mut sql = format!("SELECT * FROM \"{}\".\"{}\"", tbl_schema, tbl_name);
+                let mut where_clause = String::new();
                 let mut params = Vec::<SqlScalar>::with_capacity(8);
 
                 if let Some(pairs) = condition_pairs {
-                    build_where_clause(&mut sql, &mut params, pairs, &columns, &col_by_name)?;
-                }
-                build_order_by_clause(&mut sql, &order_by, &columns, &col_by_upper)?;
-                // Apply the user's limit, but cap it at a safe maximum.
-                // If they provide no limit, default to a sensible number.
-                let safe_limit = first.unwrap_or(100).clamp(1, 1000);
-                write!(sql, " LIMIT {}", safe_limit).unwrap();
-                if let Some(n) = offset {
-                    write!(sql, " OFFSET {}", n).unwrap();
+                    build_where_clause(
+                        &mut where_clause,
+                        &mut params,
+                        pairs,
+                        &columns,
+                        &col_by_name,
+                    )?;
                 }
 
-                execute_query(&pool, &sql, &params).await
+                let mut order_clause = String::new();
+                build_order_by_clause(&mut order_clause, &order_by, &columns, &col_by_upper)?;
+
+                let safe_limit = first.unwrap_or(100).clamp(1, 1000);
+                let off = offset.unwrap_or(0).max(0);
+
+                execute_connection_query(
+                    &pool,
+                    &tbl_schema,
+                    &tbl_name,
+                    &where_clause,
+                    &order_clause,
+                    &params,
+                    safe_limit,
+                    off,
+                    &order_by,
+                )
+                .await
             })
         },
     )
@@ -270,6 +458,8 @@ pub fn generate_query(table: Arc<Table>, pool: Arc<Pool>) -> GeneratedQuery {
         condition_type,
         condition_filter_types,
         order_by_enum,
+        connection_type,
+        edge_type,
     }
 }
 
@@ -399,31 +589,63 @@ fn build_order_by_clause(
     Ok(())
 }
 
-async fn execute_query(
+async fn execute_connection_query(
     pool: &Pool,
-    sql: &str,
+    tbl_schema: &str,
+    tbl_name: &str,
+    where_clause: &str,
+    order_clause: &str,
     params: &[SqlScalar],
+    limit: i64,
+    offset: i64,
+    order_by: &[String],
 ) -> Result<Option<FieldValue<'static>>, async_graphql::Error> {
     let param_refs: Vec<&(dyn ToSql + Sync)> =
         params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM \"{}\".\"{}\"{}",
+        tbl_schema, tbl_name, where_clause
+    );
+    let data_sql = format!(
+        "SELECT * FROM \"{}\".\"{}\"{}{} LIMIT {} OFFSET {}",
+        tbl_schema, tbl_name, where_clause, order_clause, limit, offset
+    );
 
     let client = pool
         .get()
         .await
         .map_err(|e| async_graphql::Error::new(format!("DB pool error: {e}")))?;
 
-    let rows = client
-        .query(sql, param_refs.as_slice())
-        .await
-        .map_err(|e| async_graphql::Error::new(format!("DB query error: {e}")))?;
+    let (count_row, data_rows) = tokio::try_join!(
+        client.query_one(&count_sql, param_refs.as_slice()),
+        client.query(&data_sql, param_refs.as_slice()),
+    )
+    .map_err(|e| async_graphql::Error::new(format!("DB query error: {e}")))?;
 
-    let values = rows
-        .to_json_list()
+    let total_count: i64 = count_row.get(0);
+    let json_rows = data_rows.to_json_list();
+
+    let edges: Vec<EdgePayload> = json_rows
         .into_iter()
-        .map(FieldValue::owned_any)
-        .collect::<Vec<_>>();
+        .enumerate()
+        .map(|(i, node)| EdgePayload {
+            cursor: encode_cursor(order_by, (offset as usize) + i),
+            node,
+        })
+        .collect();
 
-    Ok(Some(FieldValue::list(values)))
+    let has_next_page = (offset + edges.len() as i64) < total_count;
+    let has_previous_page = offset > 0;
+
+    let payload = ConnectionPayload {
+        total_count,
+        has_next_page,
+        has_previous_page,
+        edges,
+    };
+
+    Ok(Some(FieldValue::owned_any(payload)))
 }
 
 #[inline]
