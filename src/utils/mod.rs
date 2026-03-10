@@ -1,1 +1,1 @@
-mod inflection;
+pub mod inflection;

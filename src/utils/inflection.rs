@@ -76,6 +76,14 @@ pub fn to_snake_case(text: &str) -> String {
     res.to_lowercase()
 }
 
+/// Convert a string to PascalCase. It can handle snake_case, camelCase, and kebab-case.
+/// Examples:
+/// - "snake_case" -> "SnakeCase"
+/// - "blog_posts" -> "BlogPosts" (use with singularize for "BlogPost")
+pub fn to_pascal_case(text: &str) -> String {
+    capitalize_first(&to_camel_case(text))
+}
+
 pub fn singularize(text: &str) -> String {
     return pluralizer::pluralize(text, 1, false);
 }

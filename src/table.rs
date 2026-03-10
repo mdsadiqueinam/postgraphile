@@ -94,6 +94,14 @@ impl Column {
     pub fn _type(&self) -> &Type {
         &self.r#type
     }
+
+    pub fn nullable(&self) -> bool {
+        self.nullable
+    }
+
+    pub fn omit_read(&self) -> bool {
+        self.omit.read
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -141,5 +149,9 @@ impl Table {
 
     pub fn oid(&self) -> &u32 {
         &self.oid
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
