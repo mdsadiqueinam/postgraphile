@@ -1,4 +1,5 @@
 use bytes::BytesMut;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use tokio_postgres::types::{IsNull, ToSql, Type};
 
 /// Typed SQL parameter wrapper.
@@ -12,8 +13,13 @@ pub(crate) enum SqlScalar {
     Int8(i64),
     Float4(f32),
     Float8(f64),
+    Numeric(f64),
     Text(String),
     Json(serde_json::Value),
+    Date(NaiveDate),
+    Time(NaiveTime),
+    Timestamp(NaiveDateTime),
+    Timestamptz(DateTime<Utc>),
 }
 
 impl ToSql for SqlScalar {
@@ -29,8 +35,13 @@ impl ToSql for SqlScalar {
             SqlScalar::Int8(v) => v.to_sql(ty, out),
             SqlScalar::Float4(v) => v.to_sql(ty, out),
             SqlScalar::Float8(v) => v.to_sql(ty, out),
+            SqlScalar::Numeric(v) => v.to_sql(ty, out),
             SqlScalar::Text(v) => v.to_sql(ty, out),
             SqlScalar::Json(v) => v.to_sql(ty, out),
+            SqlScalar::Date(v) => v.to_sql(ty, out),
+            SqlScalar::Time(v) => v.to_sql(ty, out),
+            SqlScalar::Timestamp(v) => v.to_sql(ty, out),
+            SqlScalar::Timestamptz(v) => v.to_sql(ty, out),
         }
     }
 
@@ -43,11 +54,16 @@ impl ToSql for SqlScalar {
                 | Type::INT8
                 | Type::FLOAT4
                 | Type::FLOAT8
+                | Type::NUMERIC
                 | Type::TEXT
                 | Type::VARCHAR
                 | Type::BPCHAR
                 | Type::JSON
                 | Type::JSONB
+                | Type::DATE
+                | Type::TIME
+                | Type::TIMESTAMP
+                | Type::TIMESTAMPTZ
         )
     }
 

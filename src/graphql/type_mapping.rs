@@ -1,5 +1,6 @@
 use async_graphql::Value as GqlValue;
 use async_graphql::dynamic::{FieldValue, TypeRef};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use tokio_postgres::types::Type;
 
 use crate::table::Column;
@@ -22,9 +23,14 @@ pub(crate) fn get_field_value<'a>(
         // i64 exceeds GraphQL Int (i32), so serialise as String
         Type::INT8 => FieldValue::value(raw_val.as_i64().map(|v| v.to_string())),
         Type::FLOAT4 | Type::FLOAT8 => FieldValue::value(raw_val.as_f64()),
+        Type::NUMERIC => FieldValue::value(raw_val.as_f64()),
         Type::TEXT | Type::VARCHAR | Type::BPCHAR => FieldValue::value(raw_val.as_str()),
         // JSON/JSONB: serialise to a JSON string
         Type::JSON | Type::JSONB => FieldValue::value(Some(raw_val.to_string())),
+        // date/time: already serialised as ISO 8601 strings by Postgres row JSON
+        Type::DATE | Type::TIME | Type::TIMETZ | Type::TIMESTAMP | Type::TIMESTAMPTZ => {
+            FieldValue::value(raw_val.as_str())
+        }
         // --- array types ---
         Type::BOOL_ARRAY => FieldValue::list(
             raw_val
@@ -87,9 +93,14 @@ pub(crate) fn get_type_ref(column: &Column) -> TypeRef {
         // i64 exceeds GraphQL Int (i32), expose as String
         Type::INT8 => (TypeRef::STRING, false),
         Type::FLOAT4 | Type::FLOAT8 => (TypeRef::FLOAT, false),
+        Type::NUMERIC => (TypeRef::FLOAT, false),
         Type::TEXT | Type::VARCHAR | Type::BPCHAR => (TypeRef::STRING, false),
         // JSON/JSONB serialised as a JSON string
         Type::JSON | Type::JSONB => (TypeRef::STRING, false),
+        // date/time types serialised as ISO 8601 strings
+        Type::DATE | Type::TIME | Type::TIMETZ | Type::TIMESTAMP | Type::TIMESTAMPTZ => {
+            (TypeRef::STRING, false)
+        }
         // --- array types ---
         Type::BOOL_ARRAY => (TypeRef::BOOLEAN, true),
         Type::INT2_ARRAY | Type::INT4_ARRAY => (TypeRef::INT, true),
@@ -120,6 +131,10 @@ pub(crate) fn condition_type_ref(column: &Column) -> Option<TypeRef> {
         Type::TEXT | Type::VARCHAR | Type::BPCHAR => TypeRef::STRING,
         // JSON/JSONB accept a serialised JSON string for filtering
         Type::JSON | Type::JSONB => TypeRef::STRING,
+        // NUMERIC: accept as Float for filtering
+        Type::NUMERIC => TypeRef::FLOAT,
+        // date/time: accept ISO 8601 strings for filtering
+        Type::DATE | Type::TIME | Type::TIMESTAMP | Type::TIMESTAMPTZ => TypeRef::STRING,
         // arrays and everything else are excluded from condition
         _ => return None,
     };
@@ -182,6 +197,43 @@ pub(crate) fn to_sql_scalar(column: &Column, val: &GqlValue) -> Option<SqlScalar
         Type::JSON | Type::JSONB => {
             if let GqlValue::String(s) = val {
                 serde_json::from_str(s).ok().map(SqlScalar::Json)
+            } else {
+                None
+            }
+        }
+        Type::NUMERIC => {
+            if let GqlValue::Number(n) = val {
+                n.as_f64().map(SqlScalar::Numeric)
+            } else {
+                None
+            }
+        }
+        Type::DATE => {
+            if let GqlValue::String(s) = val {
+                s.parse::<NaiveDate>().ok().map(SqlScalar::Date)
+            } else {
+                None
+            }
+        }
+        Type::TIME => {
+            if let GqlValue::String(s) = val {
+                s.parse::<NaiveTime>().ok().map(SqlScalar::Time)
+            } else {
+                None
+            }
+        }
+        Type::TIMESTAMP => {
+            if let GqlValue::String(s) = val {
+                s.parse::<NaiveDateTime>().ok().map(SqlScalar::Timestamp)
+            } else {
+                None
+            }
+        }
+        Type::TIMESTAMPTZ => {
+            if let GqlValue::String(s) = val {
+                DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| SqlScalar::Timestamptz(dt.with_timezone(&Utc)))
             } else {
                 None
             }
