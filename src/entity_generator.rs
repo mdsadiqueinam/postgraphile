@@ -132,3 +132,262 @@ pub fn generate_entity(table: Arc<Table>) -> Object {
             obj.field(generate_field(Arc::new(col.clone())))
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::table::{Column, Table};
+    use serde_json::json;
+
+    // ── get_type_ref ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_type_ref_bool_non_nullable() {
+        let col = Column::new_for_test("active", Type::BOOL, false, false);
+        assert_eq!(get_type_ref(&col).to_string(), "Boolean!");
+    }
+
+    #[test]
+    fn test_type_ref_bool_nullable() {
+        let col = Column::new_for_test("active", Type::BOOL, true, false);
+        assert_eq!(get_type_ref(&col).to_string(), "Boolean");
+    }
+
+    #[test]
+    fn test_type_ref_int4_non_nullable() {
+        let col = Column::new_for_test("count", Type::INT4, false, false);
+        assert_eq!(get_type_ref(&col).to_string(), "Int!");
+    }
+
+    #[test]
+    fn test_type_ref_int4_nullable() {
+        let col = Column::new_for_test("count", Type::INT4, true, false);
+        assert_eq!(get_type_ref(&col).to_string(), "Int");
+    }
+
+    #[test]
+    fn test_type_ref_int8_exposed_as_string() {
+        // INT8 (i64) exceeds GraphQL Int (i32) range, so it is mapped to String
+        let col = Column::new_for_test("big_id", Type::INT8, false, false);
+        assert_eq!(get_type_ref(&col).to_string(), "String!");
+    }
+
+    #[test]
+    fn test_type_ref_float4_non_nullable() {
+        let col = Column::new_for_test("price", Type::FLOAT4, false, false);
+        assert_eq!(get_type_ref(&col).to_string(), "Float!");
+    }
+
+    #[test]
+    fn test_type_ref_float8_nullable() {
+        let col = Column::new_for_test("price", Type::FLOAT8, true, false);
+        assert_eq!(get_type_ref(&col).to_string(), "Float");
+    }
+
+    #[test]
+    fn test_type_ref_text_non_nullable() {
+        let col = Column::new_for_test("title", Type::TEXT, false, false);
+        assert_eq!(get_type_ref(&col).to_string(), "String!");
+    }
+
+    #[test]
+    fn test_type_ref_varchar_non_nullable() {
+        let col = Column::new_for_test("code", Type::VARCHAR, false, false);
+        assert_eq!(get_type_ref(&col).to_string(), "String!");
+    }
+
+    #[test]
+    fn test_type_ref_jsonb_non_nullable() {
+        let col = Column::new_for_test("meta", Type::JSONB, false, false);
+        assert_eq!(get_type_ref(&col).to_string(), "String!");
+    }
+
+    #[test]
+    fn test_type_ref_json_nullable() {
+        let col = Column::new_for_test("meta", Type::JSON, true, false);
+        assert_eq!(get_type_ref(&col).to_string(), "String");
+    }
+
+    // array types — nullable column → named_list (nullable list, nullable elements)
+    //             — non-nullable column → named_nn_list ([T!], nullable list of non-null elements)
+    #[test]
+    fn test_type_ref_bool_array_non_nullable() {
+        let col = Column::new_for_test("flags", Type::BOOL_ARRAY, false, false);
+        assert_eq!(get_type_ref(&col).to_string(), "[Boolean!]");
+    }
+
+    #[test]
+    fn test_type_ref_bool_array_nullable() {
+        let col = Column::new_for_test("flags", Type::BOOL_ARRAY, true, false);
+        assert_eq!(get_type_ref(&col).to_string(), "[Boolean]");
+    }
+
+    #[test]
+    fn test_type_ref_int4_array_non_nullable() {
+        let col = Column::new_for_test("ids", Type::INT4_ARRAY, false, false);
+        assert_eq!(get_type_ref(&col).to_string(), "[Int!]");
+    }
+
+    #[test]
+    fn test_type_ref_int4_array_nullable() {
+        let col = Column::new_for_test("ids", Type::INT4_ARRAY, true, false);
+        assert_eq!(get_type_ref(&col).to_string(), "[Int]");
+    }
+
+    #[test]
+    fn test_type_ref_text_array_non_nullable() {
+        let col = Column::new_for_test("tags", Type::TEXT_ARRAY, false, false);
+        assert_eq!(get_type_ref(&col).to_string(), "[String!]");
+    }
+
+    #[test]
+    fn test_type_ref_jsonb_array_non_nullable() {
+        let col = Column::new_for_test("payloads", Type::JSONB_ARRAY, false, false);
+        assert_eq!(get_type_ref(&col).to_string(), "[String!]");
+    }
+
+    // ── get_field_value ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_field_value_missing_key_returns_none() {
+        let col = Column::new_for_test("name", Type::TEXT, false, false);
+        let val = json!({ "other": "value" });
+        assert!(get_field_value(&col, &val).is_none());
+    }
+
+    #[test]
+    fn test_field_value_null_returns_none() {
+        let col = Column::new_for_test("name", Type::TEXT, true, false);
+        let val = json!({ "name": null });
+        assert!(get_field_value(&col, &val).is_none());
+    }
+
+    #[test]
+    fn test_field_value_bool_present() {
+        let col = Column::new_for_test("active", Type::BOOL, false, false);
+        let val = json!({ "active": true });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_int2_present() {
+        let col = Column::new_for_test("score", Type::INT2, false, false);
+        let val = json!({ "score": 7 });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_int4_present() {
+        let col = Column::new_for_test("count", Type::INT4, false, false);
+        let val = json!({ "count": 42 });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_int8_present() {
+        let col = Column::new_for_test("big_id", Type::INT8, false, false);
+        let val = json!({ "big_id": 9223372036854775807_i64 });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_float8_present() {
+        let col = Column::new_for_test("price", Type::FLOAT8, false, false);
+        let val = json!({ "price": 3.14 });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_text_present() {
+        let col = Column::new_for_test("title", Type::TEXT, false, false);
+        let val = json!({ "title": "hello" });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_jsonb_present() {
+        let col = Column::new_for_test("meta", Type::JSONB, false, false);
+        let val = json!({ "meta": { "key": "value" } });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_bool_array_present() {
+        let col = Column::new_for_test("flags", Type::BOOL_ARRAY, false, false);
+        let val = json!({ "flags": [true, false, true] });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_int4_array_present() {
+        let col = Column::new_for_test("ids", Type::INT4_ARRAY, false, false);
+        let val = json!({ "ids": [1, 2, 3] });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_int8_array_present() {
+        let col = Column::new_for_test("ids", Type::INT8_ARRAY, false, false);
+        let val = json!({ "ids": [1000000000000_i64, 2000000000000_i64] });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_float8_array_present() {
+        let col = Column::new_for_test("scores", Type::FLOAT8_ARRAY, false, false);
+        let val = json!({ "scores": [1.1, 2.2] });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_text_array_present() {
+        let col = Column::new_for_test("tags", Type::TEXT_ARRAY, false, false);
+        let val = json!({ "tags": ["rust", "graphql"] });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    #[test]
+    fn test_field_value_jsonb_array_present() {
+        let col = Column::new_for_test("payloads", Type::JSONB_ARRAY, false, false);
+        let val = json!({ "payloads": [{"a": 1}, {"b": 2}] });
+        assert!(get_field_value(&col, &val).is_some());
+    }
+
+    // ── generate_entity ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_entity_name_singularized_and_pascal_cased() {
+        let table = Arc::new(Table::new_for_test("blog_posts", vec![]));
+        assert_eq!(generate_entity(table).type_name(), "BlogPost");
+    }
+
+    #[test]
+    fn test_entity_name_already_singular() {
+        let table = Arc::new(Table::new_for_test("users", vec![]));
+        assert_eq!(generate_entity(table).type_name(), "User");
+    }
+
+    #[test]
+    fn test_entity_name_single_word() {
+        let table = Arc::new(Table::new_for_test("orders", vec![]));
+        assert_eq!(generate_entity(table).type_name(), "Order");
+    }
+
+    #[test]
+    fn test_entity_omit_read_column_excluded() {
+        // Two columns share the same name: one visible, one @omit read.
+        // Object::field() panics on duplicate names, so if the omitted column
+        // were included this test would panic.
+        let visible = Column::new_for_test("secret", Type::TEXT, false, false);
+        let hidden = Column::new_for_test("secret", Type::TEXT, false, true);
+        let table = Arc::new(Table::new_for_test("users", vec![visible, hidden]));
+        generate_entity(table); // panics if hidden was not filtered out
+    }
+
+    #[test]
+    fn test_entity_no_columns_empty_object() {
+        let table = Arc::new(Table::new_for_test("tokens", vec![]));
+        let obj = generate_entity(table);
+        assert_eq!(obj.type_name(), "Token");
+    }
+}

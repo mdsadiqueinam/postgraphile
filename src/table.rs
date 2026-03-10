@@ -50,6 +50,18 @@ pub enum Relkind {
     MaterializedView,
 }
 
+#[cfg(test)]
+impl Omit {
+    pub fn for_test(read: bool) -> Self {
+        Self {
+            create: false,
+            read,
+            update: false,
+            delete: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Column {
     id: u32,
@@ -104,6 +116,21 @@ impl Column {
     }
 }
 
+#[cfg(test)]
+impl Column {
+    pub fn new_for_test(name: &str, r#type: Type, nullable: bool, omit_read: bool) -> Self {
+        Self {
+            id: 0,
+            table_oid: 0,
+            name: name.to_string(),
+            comment: String::new(),
+            r#type,
+            nullable,
+            omit: Omit::for_test(omit_read),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Table {
     oid: u32,
@@ -153,5 +180,20 @@ impl Table {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+}
+
+#[cfg(test)]
+impl Table {
+    pub fn new_for_test(name: &str, columns: Vec<Column>) -> Self {
+        Self {
+            oid: 0,
+            name: name.to_string(),
+            schema_name: "public".to_string(),
+            relkind: Relkind::Table,
+            comment: String::new(),
+            columns,
+            omit: Omit::for_test(false),
+        }
     }
 }
