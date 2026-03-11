@@ -4,329 +4,35 @@ use std::sync::Arc;
 
 use async_graphql::Value as GqlValue;
 use async_graphql::dynamic::{
-    Enum, EnumItem, Field, FieldFuture, FieldValue, InputObject, InputValue, Object, TypeRef,
+    Enum, Field, FieldFuture, FieldValue, InputObject, InputValue, Object, TypeRef,
 };
-use base64::Engine;
 use deadpool_postgres::Pool;
-use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::types::ToSql;
 
 use crate::db::JsonListExt;
 use crate::table::{Column, Table};
 use crate::utils::inflection::to_pascal_case;
 
+use super::connection::{ConnectionPayload, EdgePayload, encode_cursor, make_connection_types};
+use super::filter::{
+    FilterOp, make_condition_filter_types, make_condition_type, make_order_by_enum, supports_range,
+};
 use super::sql_scalar::SqlScalar;
-use super::type_mapping::{condition_type_ref, to_sql_scalar};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FilterOp {
-    Eq,
-    NotEqual,
-    In,
-    Gt,
-    Gte,
-    Lt,
-    Lte,
-}
-
-impl FilterOp {
-    fn from_key(key: &str) -> Option<Self> {
-        match key {
-            "equal" => Some(Self::Eq),
-            "notEqual" => Some(Self::NotEqual),
-            "in" => Some(Self::In),
-            "greaterThan" => Some(Self::Gt),
-            "greaterThanEqual" => Some(Self::Gte),
-            "lessThan" => Some(Self::Lt),
-            "lessThanEqual" => Some(Self::Lte),
-            _ => None,
-        }
-    }
-
-    fn sql_operator(self) -> &'static str {
-        match self {
-            Self::Eq => "=",
-            Self::NotEqual => "<>",
-            Self::Gt => ">",
-            Self::Gte => ">=",
-            Self::Lt => "<",
-            Self::Lte => "<=",
-            Self::In => unreachable!("IN is not a simple binary operator"),
-        }
-    }
-
-    fn is_range(self) -> bool {
-        matches!(self, Self::Gt | Self::Gte | Self::Lt | Self::Lte)
-    }
-}
-
-fn supports_range(column_type: &Type) -> bool {
-    matches!(
-        *column_type,
-        Type::INT2
-            | Type::INT4
-            | Type::INT8
-            | Type::FLOAT4
-            | Type::FLOAT8
-            | Type::NUMERIC
-            | Type::DATE
-            | Type::TIME
-            | Type::TIMESTAMP
-            | Type::TIMESTAMPTZ
-    )
-}
-
-/// Builds the `{TypeName}Condition` input object (equality filters per column).
-/// Exported so callers can register it with the schema separately.
-pub fn make_condition_filter_types(table: &Table) -> Vec<InputObject> {
-    table
-        .columns()
-        .iter()
-        .filter(|c| !c.omit_read())
-        .filter_map(|col| {
-            condition_type_ref(col).map(|tr| {
-                let scalar_name = tr.to_string();
-                let filter_name =
-                    format!("{}{}Filter", table.type_name(), to_pascal_case(col.name())); // e.g. UserEmailFilter
-
-                // example generated input object for a "email" column of type String:
-                // input UserEmailFilter {
-                //   equal: String
-                // }
-                let mut input = InputObject::new(filter_name)
-                    .field(InputValue::new("equal", tr.clone()))
-                    .field(InputValue::new("notEqual", tr.clone()))
-                    .field(InputValue::new("in", TypeRef::named_list(scalar_name)));
-
-                if supports_range(col._type()) {
-                    input = input
-                        .field(InputValue::new("greaterThan", tr.clone()))
-                        .field(InputValue::new("greaterThanEqual", tr.clone()))
-                        .field(InputValue::new("lessThan", tr.clone()))
-                        .field(InputValue::new("lessThanEqual", tr));
-                }
-
-                input
-            })
-        })
-        .collect()
-}
-
-/// Builds the `{TypeName}Condition` input object (per-column operator filters).
-/// Exported so callers can register it with the schema separately.
-pub fn make_condition_type(table: &Table) -> InputObject {
-    let name = format!("{}Condition", table.type_name());
-
-    table
-        .columns()
-        .iter()
-        .filter(|c| !c.omit_read())
-        .fold(InputObject::new(name), |obj, col| {
-            if condition_type_ref(col).is_some() {
-                let filter_name =
-                    format!("{}{}Filter", table.type_name(), to_pascal_case(col.name()));
-                obj.field(InputValue::new(
-                    col.name().as_str(),
-                    TypeRef::named(filter_name),
-                ))
-            } else {
-                obj
-            }
-        })
-}
-
-/// Builds the `{TypeName}OrderBy` enum (COLUMN_ASC / COLUMN_DESC per column).
-/// Exported so callers can register it with the schema separately.
-pub fn make_order_by_enum(table: &Table) -> Enum {
-    let name = format!("{}OrderBy", table.type_name());
-    table
-        .columns()
-        .iter()
-        .filter(|c| !c.omit_read())
-        .flat_map(|c| {
-            let upper = c.name().to_uppercase();
-            [
-                EnumItem::new(format!("{}_ASC", upper)),
-                EnumItem::new(format!("{}_DESC", upper)),
-            ]
-        })
-        .fold(Enum::new(name), |e, item| e.item(item))
-}
-
-// ── Relay-style connection payloads ──────────────────────────────────────────
-
-#[derive(Clone, Debug)]
-struct EdgePayload {
-    cursor: String,
-    node: serde_json::Value,
-}
-
-#[derive(Clone, Debug)]
-struct ConnectionPayload {
-    total_count: i64,
-    has_next_page: bool,
-    has_previous_page: bool,
-    edges: Vec<EdgePayload>,
-}
-
-fn encode_cursor(order_by: &[String], abs_index: usize) -> String {
-    let json = if order_by.is_empty() {
-        serde_json::json!([abs_index + 1])
-    } else {
-        let keys: Vec<String> = order_by.iter().map(|s| s.to_lowercase()).collect();
-        serde_json::json!([keys, abs_index + 1])
-    };
-    base64::engine::general_purpose::STANDARD.encode(json.to_string())
-}
-
-// ── Shared PageInfo type (register once globally) ───────────────────────────
-
-pub fn make_page_info_type() -> Object {
-    Object::new("PageInfo")
-        .field(Field::new(
-            "hasNextPage",
-            TypeRef::named_nn(TypeRef::BOOLEAN),
-            |ctx| {
-                FieldFuture::new(async move {
-                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
-                    Ok(Some(FieldValue::value(payload.has_next_page)))
-                })
-            },
-        ))
-        .field(Field::new(
-            "hasPreviousPage",
-            TypeRef::named_nn(TypeRef::BOOLEAN),
-            |ctx| {
-                FieldFuture::new(async move {
-                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
-                    Ok(Some(FieldValue::value(payload.has_previous_page)))
-                })
-            },
-        ))
-        .field(Field::new(
-            "startCursor",
-            TypeRef::named(TypeRef::STRING),
-            |ctx| {
-                FieldFuture::new(async move {
-                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
-                    let val = payload
-                        .edges
-                        .first()
-                        .map(|e| FieldValue::value(e.cursor.clone()));
-                    Ok(val)
-                })
-            },
-        ))
-        .field(Field::new(
-            "endCursor",
-            TypeRef::named(TypeRef::STRING),
-            |ctx| {
-                FieldFuture::new(async move {
-                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
-                    let val = payload
-                        .edges
-                        .last()
-                        .map(|e| FieldValue::value(e.cursor.clone()));
-                    Ok(val)
-                })
-            },
-        ))
-}
-
-// ── Per-table Connection + Edge types ───────────────────────────────────────
-
-pub fn make_connection_types(table: &Table) -> (Object, Object) {
-    let type_name = table.type_name();
-    let edge_type_name = format!("{}Edge", type_name);
-    let connection_type_name = format!("{}Connection", type_name);
-
-    let node_type = type_name.clone();
-    let edge = Object::new(&edge_type_name)
-        .field(Field::new(
-            "cursor",
-            TypeRef::named_nn(TypeRef::STRING),
-            |ctx| {
-                FieldFuture::new(async move {
-                    let edge = ctx.parent_value.try_downcast_ref::<EdgePayload>()?;
-                    Ok(Some(FieldValue::value(edge.cursor.clone())))
-                })
-            },
-        ))
-        .field(Field::new("node", TypeRef::named_nn(node_type), |ctx| {
-            FieldFuture::new(async move {
-                let edge = ctx.parent_value.try_downcast_ref::<EdgePayload>()?;
-                Ok(Some(FieldValue::owned_any(edge.node.clone())))
-            })
-        }));
-
-    let edge_ref = edge_type_name.clone();
-    let connection = Object::new(&connection_type_name)
-        .field(Field::new(
-            "totalCount",
-            TypeRef::named_nn(TypeRef::INT),
-            |ctx| {
-                FieldFuture::new(async move {
-                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
-                    Ok(Some(FieldValue::value(payload.total_count as i32)))
-                })
-            },
-        ))
-        .field(Field::new(
-            "pageInfo",
-            TypeRef::named_nn("PageInfo"),
-            |ctx| {
-                FieldFuture::new(async move {
-                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
-                    Ok(Some(FieldValue::owned_any(payload.clone())))
-                })
-            },
-        ))
-        .field(Field::new(
-            "edges",
-            TypeRef::named_nn_list_nn(edge_ref),
-            |ctx| {
-                FieldFuture::new(async move {
-                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
-                    let list: Vec<FieldValue> = payload
-                        .edges
-                        .iter()
-                        .map(|e| FieldValue::owned_any(e.clone()))
-                        .collect();
-                    Ok(Some(FieldValue::list(list)))
-                })
-            },
-        ))
-        .field(Field::new(
-            "nodes",
-            TypeRef::named_nn_list_nn(type_name),
-            |ctx| {
-                FieldFuture::new(async move {
-                    let payload = ctx.parent_value.try_downcast_ref::<ConnectionPayload>()?;
-                    let list: Vec<FieldValue> = payload
-                        .edges
-                        .iter()
-                        .map(|e| FieldValue::owned_any(e.node.clone()))
-                        .collect();
-                    Ok(Some(FieldValue::list(list)))
-                })
-            },
-        ));
-
-    (connection, edge)
-}
+use super::type_mapping::to_sql_scalar;
 
 /// Everything the schema builder needs for one table.
 pub struct GeneratedQuery {
     /// The root Query field (e.g. `allUsers`).
     pub query_field: Field,
-    /// The `{T}Condition` input type — must be registered with the schema.
+    /// The `{T}Condition` input type - must be registered with the schema.
     pub condition_type: InputObject,
     /// Per-column filter input objects referenced by `{T}Condition`.
     pub condition_filter_types: Vec<InputObject>,
-    /// The `{T}OrderBy` enum — must be registered with the schema.
+    /// The `{T}OrderBy` enum - must be registered with the schema.
     pub order_by_enum: Enum,
-    /// The `{T}Connection` object type — must be registered with the schema.
+    /// The `{T}Connection` object type - must be registered with the schema.
     pub connection_type: Object,
-    /// The `{T}Edge` object type — must be registered with the schema.
+    /// The `{T}Edge` object type - must be registered with the schema.
     pub edge_type: Object,
 }
 
@@ -336,7 +42,7 @@ pub struct GeneratedQuery {
 /// ```graphql
 /// allUsers(
 ///   condition: UserCondition   # equality filter per column
-///   orderBy:   UserOrderBy     # [COLUMN_ASC] / [COLUMN_DESC]
+///   orderBy:   [UserOrderBy]   # COLUMN_ASC / COLUMN_DESC
 ///   first:     Int             # LIMIT
 ///   offset:    Int             # OFFSET
 /// ): UserConnection!
@@ -463,7 +169,7 @@ pub fn generate_query(table: Arc<Table>, pool: Arc<Pool>) -> GeneratedQuery {
     }
 }
 
-// ── Extracted helpers ────────────────────────────────────────────────────────
+// -- SQL helpers --------------------------------------------------------------
 
 fn build_where_clause(
     sql: &mut String,
@@ -655,105 +361,5 @@ fn write_where_sep(sql: &mut String, has_where: &mut bool) {
     } else {
         sql.push_str(" WHERE ");
         *has_where = true;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::table::Table;
-    use tokio_postgres::types::Type;
-
-    #[test]
-    fn test_condition_type_name() {
-        let table = Table::new_for_test("blog_posts", vec![]);
-        assert_eq!(make_condition_type(&table).type_name(), "BlogPostCondition");
-    }
-
-    #[test]
-    fn test_condition_type_name_users() {
-        let table = Table::new_for_test("users", vec![]);
-        assert_eq!(make_condition_type(&table).type_name(), "UserCondition");
-    }
-
-    #[test]
-    fn test_order_by_enum_name() {
-        let table = Table::new_for_test("blog_posts", vec![]);
-        assert_eq!(make_order_by_enum(&table).type_name(), "BlogPostOrderBy");
-    }
-
-    #[test]
-    fn test_order_by_enum_name_users() {
-        let table = Table::new_for_test("users", vec![]);
-        assert_eq!(make_order_by_enum(&table).type_name(), "UserOrderBy");
-    }
-
-    #[test]
-    fn test_filter_op_from_key_not_equal() {
-        assert_eq!(FilterOp::from_key("notEqual"), Some(FilterOp::NotEqual));
-    }
-
-    #[test]
-    fn test_filter_op_from_key_range() {
-        assert_eq!(FilterOp::from_key("greaterThanEqual"), Some(FilterOp::Gte));
-        assert_eq!(FilterOp::from_key("lessThan"), Some(FilterOp::Lt));
-    }
-
-    #[test]
-    fn test_filter_op_from_key_default_eq() {
-        assert_eq!(FilterOp::from_key("equal"), Some(FilterOp::Eq));
-    }
-
-    #[test]
-    fn test_filter_op_from_key_unknown() {
-        assert_eq!(FilterOp::from_key("between"), None);
-    }
-
-    #[test]
-    fn test_filter_op_sql_operator() {
-        assert_eq!(FilterOp::Eq.sql_operator(), "=");
-        assert_eq!(FilterOp::NotEqual.sql_operator(), "<>");
-        assert_eq!(FilterOp::Gt.sql_operator(), ">");
-        assert_eq!(FilterOp::Gte.sql_operator(), ">=");
-        assert_eq!(FilterOp::Lt.sql_operator(), "<");
-        assert_eq!(FilterOp::Lte.sql_operator(), "<=");
-    }
-
-    #[test]
-    fn test_filter_op_is_range() {
-        assert!(!FilterOp::Eq.is_range());
-        assert!(!FilterOp::NotEqual.is_range());
-        assert!(!FilterOp::In.is_range());
-        assert!(FilterOp::Gt.is_range());
-        assert!(FilterOp::Gte.is_range());
-        assert!(FilterOp::Lt.is_range());
-        assert!(FilterOp::Lte.is_range());
-    }
-
-    #[test]
-    fn test_supports_range_for_numeric() {
-        assert!(supports_range(&Type::INT2));
-        assert!(supports_range(&Type::INT4));
-        assert!(supports_range(&Type::INT8));
-        assert!(supports_range(&Type::FLOAT4));
-        assert!(supports_range(&Type::FLOAT8));
-        assert!(supports_range(&Type::NUMERIC));
-    }
-
-    #[test]
-    fn test_supports_range_for_datetime() {
-        assert!(supports_range(&Type::DATE));
-        assert!(supports_range(&Type::TIME));
-        assert!(supports_range(&Type::TIMESTAMP));
-        assert!(supports_range(&Type::TIMESTAMPTZ));
-        // TIMETZ is excluded — no simple ToSql mapping available
-        assert!(!supports_range(&Type::TIMETZ));
-    }
-
-    #[test]
-    fn test_supports_range_for_non_numeric() {
-        assert!(!supports_range(&Type::TEXT));
-        assert!(!supports_range(&Type::BOOL));
-        assert!(!supports_range(&Type::JSON));
     }
 }
