@@ -85,7 +85,7 @@ pub fn to_pascal_case(text: &str) -> String {
 }
 
 pub fn singularize(text: &str) -> String {
-    return pluralizer::pluralize(text, 1, false);
+    pluralizer::pluralize(text, 1, false)
 }
 
 #[cfg(test)]

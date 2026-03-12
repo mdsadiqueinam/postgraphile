@@ -10,7 +10,9 @@ use super::super::filter::{FilterOp, supports_range};
 use super::super::sql_scalar::SqlScalar;
 use super::super::type_mapping::to_sql_scalar;
 
-pub(super) fn build_where_clause(
+use crate::error::gql_err;
+
+pub(crate) fn build_where_clause(
     sql: &mut String,
     params: &mut Vec<SqlScalar>,
     pairs: Vec<(String, GqlValue)>,
@@ -76,7 +78,7 @@ fn push_in_clause(
 ) -> Result<(), async_graphql::Error> {
     if let GqlValue::List(values) = op_val {
         if values.len() > 10_000 {
-            return Err(super::gql_err("IN filter exceeds maximum of 10,000 items"));
+            return Err(gql_err("IN filter exceeds maximum of 10,000 items"));
         }
         let scalars: Vec<SqlScalar> = values
             .into_iter()
@@ -119,9 +121,7 @@ pub(super) fn build_order_by_clause(
             continue;
         };
         let Some(&col_idx) = col_by_upper.get(col_upper) else {
-            return Err(super::gql_err(format!(
-                "unknown column for ordering: {col_upper}"
-            )));
+            return Err(gql_err(format!("unknown column for ordering: {col_upper}")));
         };
         if i > 0 {
             sql.push_str(", ");

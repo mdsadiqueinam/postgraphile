@@ -13,10 +13,10 @@ fn map_columns_to_table(tables: Vec<Table>, columns: Vec<Column>) -> Vec<Table> 
         }
     }
 
-    return table_map.into_values().collect();
+    table_map.into_values().collect()
 }
 
-pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -> Vec<Table> {
+pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &[String]) -> Vec<Table> {
     let client = pool.get().await.unwrap();
     let tables: Vec<Table> = client
         .query(
@@ -31,7 +31,7 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
             WHERE n.nspname = ANY($1)
             AND c.relkind IN ('r', 'm')
             ORDER BY n.nspname, c.relname;",
-            &[schemas],
+            &[&schemas],
         )
         .await
         .unwrap()
@@ -49,6 +49,7 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
                 a.attname AS column_name, 
                 a.atttypid AS type_oid, 
                 NOT a.attnotnull AS nullable,
+                a.atthasdef AS has_default,
                 pg_catalog.col_description(a.attrelid, a.attnum) AS comment
             FROM 
                 pg_catalog.pg_attribute a
@@ -66,5 +67,5 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
         .map(|r| Column::form_row(r))
         .collect::<Vec<Column>>();
 
-    return map_columns_to_table(tables, columns);
+    map_columns_to_table(tables, columns)
 }

@@ -1,13 +1,11 @@
-use std::fmt::Write;
-use std::future::Future;
-use std::pin::Pin;
-
 use async_graphql::dynamic::FieldValue;
 use deadpool_postgres::Pool;
 use tokio_postgres::types::ToSql;
 
 use crate::db::JsonListExt;
-use crate::models::config::TransactionConfig;
+use crate::db::transaction::with_transaction;
+use crate::error::gql_err;
+use crate::models::transaction::TransactionConfig;
 
 use super::super::connection::{ConnectionPayload, EdgePayload, encode_cursor};
 use super::super::sql_scalar::SqlScalar;
@@ -48,7 +46,7 @@ pub(super) async fn execute_connection_query(
                 client.query_one(&count_sql, &base_refs),
                 client.query(&data_sql, &data_refs),
             )
-            .map_err(|e| super::gql_err(format!("DB query error: {e}")))?;
+            .map_err(|e| gql_err(format!("DB query error: {e}")))?;
 
             let total_count: i64 = count_row.get(0);
             let json_rows = data_rows.to_json_list();
@@ -72,68 +70,4 @@ pub(super) async fn execute_connection_query(
         })
     })
     .await
-}
-
-/// Acquires a connection, wraps the callback in a transaction (BEGIN/COMMIT),
-/// and rolls back automatically on error. Works with or without a
-/// [`TransactionConfig`] — if none is provided a plain `BEGIN` is used.
-async fn with_transaction<T>(
-    pool: &Pool,
-    tx_config: Option<TransactionConfig>,
-    callback: impl for<'c> FnOnce(
-        &'c tokio_postgres::Client,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<T, async_graphql::Error>> + Send + 'c>,
-    >,
-) -> Result<T, async_graphql::Error> {
-    let client = pool
-        .get()
-        .await
-        .map_err(|e| super::gql_err(format!("DB pool error: {e}")))?;
-
-    // Build BEGIN with optional transaction characteristics.
-    let mut begin = String::from("BEGIN");
-    if let Some(ref cfg) = tx_config {
-        if let Some(level) = cfg.isolation_level {
-            let lvl_str = match level {
-                tokio_postgres::IsolationLevel::ReadUncommitted => "READ UNCOMMITTED",
-                tokio_postgres::IsolationLevel::ReadCommitted => "READ COMMITTED",
-                tokio_postgres::IsolationLevel::RepeatableRead => "REPEATABLE READ",
-                tokio_postgres::IsolationLevel::Serializable => "SERIALIZABLE",
-                _ => "READ COMMITTED",
-            };
-            write!(begin, " ISOLATION LEVEL {lvl_str}").unwrap();
-        }
-        if cfg.read_only {
-            begin.push_str(" READ ONLY");
-        }
-        if cfg.deferrable {
-            begin.push_str(" DEFERRABLE");
-        }
-    }
-    client
-        .batch_execute(&begin)
-        .await
-        .map_err(|e| super::gql_err(format!("BEGIN error: {e}")))?;
-
-    // Apply SET LOCAL directives (role, settings, timeout) inside the open transaction.
-    if let Some(ref cfg) = tx_config {
-        cfg.apply(&*client).await?;
-    }
-
-    let result = callback(&*client).await;
-
-    match &result {
-        Ok(_) => {
-            client
-                .batch_execute("COMMIT")
-                .await
-                .map_err(|e| super::gql_err(format!("COMMIT error: {e}")))?;
-        }
-        Err(_) => {
-            let _ = client.batch_execute("ROLLBACK").await;
-        }
-    }
-
-    result
 }

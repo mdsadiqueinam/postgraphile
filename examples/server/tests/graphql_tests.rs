@@ -15,7 +15,7 @@
 
 use async_graphql::Request;
 use serde_json::{Value as Json, json};
-use turbograph::{Config, PoolConfig, build_schema};
+use turbograph::{Config, PoolConfig, TurboGraph};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -25,14 +25,14 @@ fn db_url() -> String {
 }
 
 async fn make_schema() -> async_graphql::dynamic::Schema {
-    let (schema, _watcher) = build_schema(Config {
+    let server = TurboGraph::new(Config {
         pool: PoolConfig::ConnectionString(db_url()),
         schemas: vec!["public".into()],
         watch_pg: false,
     })
     .await
     .expect("failed to build schema");
-    schema
+    server.schema().await
 }
 
 /// Execute a GraphQL query and panic on any errors, returning the `data` object
@@ -524,4 +524,131 @@ async fn test_post_tags_for_tag_graphql() {
     )
     .await;
     assert_eq!(data["allPostTags"]["totalCount"], json!(2));
+}
+
+// ── mutation introspection ────────────────────────────────────────────────────
+
+/// Verify mutation fields exist for tables (not materialized views or @omit'd).
+#[tokio::test]
+async fn test_schema_exposes_mutation_fields() {
+    let schema = make_schema().await;
+    let data = gql(
+        &schema,
+        r#"{ __schema { mutationType { fields { name } } } }"#,
+    )
+    .await;
+
+    let fields: Vec<&str> = data["__schema"]["mutationType"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+
+    // Tables with mutations
+    for expected in &[
+        "createUser",
+        "updateUser",
+        "deleteUser",
+        "createPost",
+        "updatePost",
+        "deletePost",
+        "createComment",
+        "createTag",
+    ] {
+        assert!(
+            fields.contains(expected),
+            "missing mutation field: {expected}"
+        );
+    }
+
+    // post_tags has @omit create,update,delete → no mutations
+    assert!(
+        !fields.iter().any(|f| f.contains("PostTag")),
+        "post_tags should have no mutations due to @omit"
+    );
+}
+
+// ── create mutation ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_create_tag() {
+    let schema = make_schema().await;
+    let data = gql(
+        &schema,
+        r#"mutation { createTag(input: { name: "testing" }) { id name } }"#,
+    )
+    .await;
+
+    let tag = &data["createTag"];
+    assert_eq!(tag["name"], json!("testing"));
+    assert!(tag["id"].as_i64().unwrap() > 0);
+
+    // Clean up
+    gql(
+        &schema,
+        r#"mutation { deleteTag(condition: { name: { equal: "testing" } }) { id } }"#,
+    )
+    .await;
+}
+
+// ── update mutation ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_update_user_bio() {
+    let schema = make_schema().await;
+
+    // Update diana's bio (was NULL)
+    let data = gql(
+        &schema,
+        r#"mutation {
+            updateUser(
+                patch: { bio: "New bio for Diana" }
+                condition: { username: { equal: "diana" } }
+            ) { username bio }
+        }"#,
+    )
+    .await;
+
+    let users = data["updateUser"].as_array().unwrap();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0]["username"], json!("diana"));
+    assert_eq!(users[0]["bio"], json!("New bio for Diana"));
+
+    // Revert
+    gql(
+        &schema,
+        r#"mutation {
+            updateUser(
+                patch: { bio: null }
+                condition: { username: { equal: "diana" } }
+            ) { id }
+        }"#,
+    )
+    .await;
+}
+
+// ── delete mutation ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_create_and_delete_tag() {
+    let schema = make_schema().await;
+
+    // Create
+    gql(
+        &schema,
+        r#"mutation { createTag(input: { name: "ephemeral" }) { id } }"#,
+    )
+    .await;
+
+    // Delete
+    let data = gql(
+        &schema,
+        r#"mutation { deleteTag(condition: { name: { equal: "ephemeral" } }) { name } }"#,
+    )
+    .await;
+
+    let deleted = data["deleteTag"].as_array().unwrap();
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0]["name"], json!("ephemeral"));
 }

@@ -5,8 +5,8 @@ use async_graphql::Value as GqlValue;
 use async_graphql::dynamic::{Enum, Field, FieldFuture, InputObject, InputValue, Object, TypeRef};
 use deadpool_postgres::Pool;
 
-use crate::models::config::TransactionConfig;
 use crate::models::table::Table;
+use crate::models::transaction::TransactionConfig;
 use crate::utils::inflection::to_pascal_case;
 
 use super::connection::make_connection_types;
@@ -14,7 +14,7 @@ use super::filter::{make_condition_filter_types, make_condition_type, make_order
 use super::sql_scalar::SqlScalar;
 
 mod executor;
-mod sql;
+pub(crate) mod sql;
 
 /// Everything the schema builder needs for one table.
 pub struct GeneratedQuery {
@@ -156,9 +156,4 @@ pub fn generate_query(table: Arc<Table>, pool: Arc<Pool>) -> GeneratedQuery {
         connection_type,
         edge_type,
     }
-}
-
-#[inline]
-fn gql_err(msg: impl std::fmt::Display) -> async_graphql::Error {
-    async_graphql::Error::new(msg.to_string())
 }
