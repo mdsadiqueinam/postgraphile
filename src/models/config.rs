@@ -29,3 +29,16 @@ pub struct TransactionConfig {
     pub timeout_seconds: Option<u64>,
     pub settings: Vec<(String, TransactionSettingsValue)>,
 }
+
+impl Default for TransactionConfig {
+    fn default() -> Self {
+        Self {
+            isolation_level: None,
+            read_only: false,
+            deferrable: false,
+            role: None,
+            timeout_seconds: None,
+            settings: Vec::new(),
+        }
+    }
+}

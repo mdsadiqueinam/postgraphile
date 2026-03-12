@@ -246,7 +246,7 @@ pub(crate) fn to_sql_scalar(column: &Column, val: &GqlValue) -> Option<SqlScalar
 mod tests {
     use super::super::sql_scalar::SqlScalar;
     use super::*;
-    use crate::table::Column;
+    use crate::models::table::Column;
     use async_graphql::Value as GqlValue;
     use serde_json::json;
     use tokio_postgres::types::Type;
