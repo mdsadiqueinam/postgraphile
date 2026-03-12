@@ -195,6 +195,18 @@ impl Table {
     pub fn omit_read(&self) -> bool {
         self.omit.read
     }
+
+    pub fn omit_create(&self) -> bool {
+        self.omit.create || self.relkind == Relkind::MaterializedView
+    }
+
+    pub fn omit_update(&self) -> bool {
+        self.omit.update || self.relkind == Relkind::MaterializedView
+    }
+
+    pub fn omit_delete(&self) -> bool {
+        self.omit.delete || self.relkind == Relkind::MaterializedView
+    }
 }
 
 #[cfg(test)]
