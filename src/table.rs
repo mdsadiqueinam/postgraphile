@@ -78,7 +78,7 @@ pub struct Column {
 impl Column {
     pub(crate) fn form_row(row: &tokio_postgres::Row) -> Self {
         let table_oid = row.try_get::<_, u32>(0).unwrap();
-        let column_id = row.try_get::<_, u32>(1).unwrap();
+        let column_id = row.try_get::<_, i32>(1).unwrap() as u32;
         let column_name = row.try_get::<_, String>(2).unwrap();
         let type_oid = row.try_get::<_, u32>(3).unwrap();
         let nullable = row.try_get::<_, bool>(4).unwrap();
@@ -147,10 +147,10 @@ pub struct Table {
 impl Table {
     pub(crate) fn from_row(row: &tokio_postgres::Row) -> Self {
         let oid = row.try_get::<_, u32>(0).unwrap();
-        let schema_name = row.try_get::<_, String>(0).unwrap();
-        let table_name = row.try_get::<_, String>(1).unwrap();
-        let relkind_str = row.try_get::<_, String>(2).unwrap();
-        let comment = row.try_get::<_, String>(3).unwrap_or("".to_string());
+        let schema_name = row.try_get::<_, String>(1).unwrap();
+        let table_name = row.try_get::<_, String>(2).unwrap();
+        let relkind_str = row.try_get::<_, String>(3).unwrap();
+        let comment = row.try_get::<_, String>(4).unwrap_or("".to_string());
         let omit = Omit::new(&comment);
 
         return Self {

@@ -24,7 +24,7 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
                 c.oid, 
                 n.nspname AS schema_name,
                 c.relname AS table_name,
-                c.relkind,
+                c.relkind::text,
                 pg_catalog.obj_description(c.oid, 'pg_class') AS comment
             FROM pg_catalog.pg_class c
             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace     -- To filter schema
@@ -45,7 +45,7 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &Vec<String>) -
         .query(
             "SELECT 
                 a.attrelid AS table_oid, 
-                a.attnum AS column_id,
+                a.attnum::int4 AS column_id,
                 a.attname AS column_name, 
                 a.atttypid AS type_oid, 
                 NOT a.attnotnull AS nullable,
