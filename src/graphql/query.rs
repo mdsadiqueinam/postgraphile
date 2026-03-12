@@ -175,7 +175,7 @@ fn build_where_clause(
     sql: &mut String,
     params: &mut Vec<SqlScalar>,
     pairs: Vec<(String, GqlValue)>,
-    columns: &[Column],
+    columns: &[Arc<Column>],
     col_by_name: &HashMap<String, usize>,
 ) -> Result<(), async_graphql::Error> {
     let mut has_where = false;
@@ -266,7 +266,7 @@ fn push_in_clause(
 fn build_order_by_clause(
     sql: &mut String,
     order_by: &[String],
-    columns: &[Column],
+    columns: &[Arc<Column>],
     col_by_upper: &HashMap<String, usize>,
 ) -> Result<(), async_graphql::Error> {
     if order_by.is_empty() {

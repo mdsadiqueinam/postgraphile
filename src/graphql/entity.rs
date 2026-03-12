@@ -30,9 +30,7 @@ pub fn generate_entity(table: Arc<Table>) -> Object {
         .columns()
         .iter()
         .filter(|col| !col.omit_read())
-        .fold(obj, |obj, col| {
-            obj.field(generate_field(Arc::new(col.clone())))
-        })
+        .fold(obj, |obj, col| obj.field(generate_field(col.clone())))
 }
 
 #[cfg(test)]

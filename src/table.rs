@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use tokio_postgres::types::Type;
 
 use crate::utils::inflection::{singularize, to_pascal_case};
@@ -140,7 +140,7 @@ pub struct Table {
     schema_name: String,
     relkind: Relkind,
     comment: String,
-    columns: Vec<Column>,
+    columns: Vec<Arc<Column>>,
     omit: Omit,
 }
 
@@ -169,10 +169,10 @@ impl Table {
     }
 
     pub(crate) fn push_column(&mut self, column: Column) {
-        self.columns.push(column);
+        self.columns.push(Arc::new(column));
     }
 
-    pub fn columns(&self) -> &[Column] {
+    pub fn columns(&self) -> &[Arc<Column>] {
         &self.columns
     }
 
@@ -202,7 +202,7 @@ impl Table {
             schema_name: "public".to_string(),
             relkind: Relkind::Table,
             comment: String::new(),
-            columns,
+            columns: columns.into_iter().map(Arc::new).collect(),
             omit: Omit::for_test(false),
         }
     }
