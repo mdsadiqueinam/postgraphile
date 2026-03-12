@@ -15,7 +15,7 @@
 
 use async_graphql::Request;
 use serde_json::{Value as Json, json};
-use turbograph::{Config, PoolConfig, build_schema};
+use turbograph::{Config, PoolConfig, TurboGraph};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -25,14 +25,14 @@ fn db_url() -> String {
 }
 
 async fn make_schema() -> async_graphql::dynamic::Schema {
-    let (schema, _watcher) = build_schema(Config {
+    let server = TurboGraph::new(Config {
         pool: PoolConfig::ConnectionString(db_url()),
         schemas: vec!["public".into()],
         watch_pg: false,
     })
     .await
     .expect("failed to build schema");
-    schema
+    server.schema().await
 }
 
 /// Execute a GraphQL query and panic on any errors, returning the `data` object

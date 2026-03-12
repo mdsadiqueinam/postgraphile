@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_graphql::dynamic::Schema;
 use deadpool_postgres::Pool;
-use tokio::sync::watch;
+use tokio::sync::RwLock;
 use tokio_postgres::AsyncMessage;
 
 /// SQL to install DDL event triggers that send NOTIFY on schema changes.
@@ -38,7 +38,7 @@ pub(crate) async fn start_watching(
     connection_url: String,
     pool: Arc<Pool>,
     schemas: Vec<String>,
-    tx: watch::Sender<Schema>,
+    live_schema: Arc<RwLock<Schema>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (client, mut connection) =
         tokio_postgres::connect(&connection_url, tokio_postgres::NoTls).await?;
@@ -67,7 +67,7 @@ pub(crate) async fn start_watching(
     client.batch_execute("LISTEN turbograph_watch").await?;
     eprintln!("[turbograph] watching for schema changes");
 
-    // Process notifications: debounce, rebuild, and broadcast.
+    // Process notifications: debounce, rebuild, and swap.
     tokio::spawn(async move {
         // Keep the LISTEN client alive for the lifetime of this task.
         let _client = client;
@@ -82,10 +82,7 @@ pub(crate) async fn start_watching(
             match crate::schema::rebuild_schema(&pool, &schemas).await {
                 Ok(new_schema) => {
                     eprintln!("[turbograph] schema rebuilt successfully");
-                    if tx.send(new_schema).is_err() {
-                        eprintln!("[turbograph] all receivers dropped, stopping watcher");
-                        break;
-                    }
+                    *live_schema.write().await = new_schema;
                 }
                 Err(e) => {
                     eprintln!("[turbograph] failed to rebuild schema: {e}");

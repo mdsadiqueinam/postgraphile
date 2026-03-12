@@ -2,33 +2,81 @@ use std::sync::Arc;
 
 use async_graphql::dynamic::{Object, Schema};
 use deadpool_postgres::Pool;
+use tokio::sync::RwLock;
 
 use crate::graphql;
+use crate::models::config::{Config, PoolConfig};
 
-/// A receiver for live schema updates when `watch_pg` is enabled.
+/// The main entry point for consuming the library.
 ///
-/// Use [`current()`](SchemaWatcher::current) to get the latest schema, or
-/// [`next()`](SchemaWatcher::next) to wait for the next DDL-triggered rebuild.
+/// `TurboGraph` wraps the dynamically-built GraphQL schema and, when
+/// `watch_pg` is enabled, transparently handles live-reloading in the
+/// background. It is cheaply cloneable (backed by `Arc`) and can be
+/// used as shared state in any async web framework (axum, actix-web,
+/// poem, etc.).
+///
+/// # Example (axum)
+///
+/// ```rust,ignore
+/// let server = TurboGraph::new(config).await?;
+/// let app = Router::new()
+///     .route("/graphql", get(graphiql).post(handler))
+///     .with_state(server);
+/// ```
 #[derive(Clone)]
-pub struct SchemaWatcher {
-    rx: tokio::sync::watch::Receiver<Schema>,
+pub struct TurboGraph {
+    schema: Arc<RwLock<Schema>>,
 }
 
-impl SchemaWatcher {
-    pub(crate) fn new(rx: tokio::sync::watch::Receiver<Schema>) -> Self {
-        Self { rx }
+impl TurboGraph {
+    /// Build the GraphQL schema from the database described by `config`.
+    ///
+    /// When [`Config::watch_pg`] is `true`, event triggers are installed and a
+    /// background task is spawned that automatically swaps in a freshly built
+    /// schema whenever a DDL change is detected.
+    pub async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let watch_pg = config.watch_pg;
+
+        let connection_url = if watch_pg {
+            match &config.pool {
+                PoolConfig::ConnectionString(url) => Some(url.clone()),
+                PoolConfig::Pool(_) => {
+                    return Err("watch_pg requires PoolConfig::ConnectionString".into());
+                }
+            }
+        } else {
+            None
+        };
+
+        let pool = Arc::new(crate::db::pool::resolve(config.pool)?);
+        let built_schema = rebuild_schema(&pool, &config.schemas).await?;
+        let schema = Arc::new(RwLock::new(built_schema));
+
+        if watch_pg {
+            let url = connection_url.unwrap();
+            crate::db::watch::install_triggers(&pool).await?;
+            crate::db::watch::start_watching(url, pool, config.schemas, schema.clone()).await?;
+        }
+
+        Ok(Self { schema })
     }
 
-    /// Returns the latest schema.
-    pub fn current(&self) -> Schema {
-        self.rx.borrow().clone()
+    /// Execute a GraphQL request against the current schema.
+    pub async fn execute(&self, request: async_graphql::Request) -> async_graphql::Response {
+        let schema = self.schema.read().await.clone();
+        schema.execute(request).await
     }
 
-    /// Waits until a DDL change triggers a schema rebuild, then returns the
-    /// new schema. Returns `None` if the watcher background task has exited.
-    pub async fn next(&mut self) -> Option<Schema> {
-        self.rx.changed().await.ok()?;
-        Some(self.rx.borrow_and_update().clone())
+    /// Returns the GraphiQL HTML page pointing at the given `endpoint`.
+    pub fn graphiql(endpoint: &str) -> String {
+        async_graphql::http::GraphiQLSource::build()
+            .endpoint(endpoint)
+            .finish()
+    }
+
+    /// Returns a clone of the current underlying dynamic schema.
+    pub async fn schema(&self) -> Schema {
+        self.schema.read().await.clone()
     }
 }
 

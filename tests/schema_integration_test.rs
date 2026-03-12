@@ -27,7 +27,7 @@ async fn all_db_tables_are_present_in_schema() {
     let url = db_url();
 
     // Build the schema from the live database.
-    let (schema, _watcher) = build_schema(Config {
+    let server = build_schema(Config {
         pool: PoolConfig::ConnectionString(url.clone()),
         schemas: vec!["public".to_string()],
         watch_pg: false,
@@ -57,8 +57,8 @@ async fn all_db_tables_are_present_in_schema() {
     assert!(!table_names.is_empty(), "no tables found in the database");
 
     // Execute GraphQL introspection against the built schema.
-    let result = schema
-        .execute("{ __schema { queryType { fields { name } } } }")
+    let result = server
+        .execute("{ __schema { queryType { fields { name } } } }".into())
         .await;
 
     assert!(
