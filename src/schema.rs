@@ -94,9 +94,16 @@ pub(crate) async fn rebuild_schema(
     let tables = crate::db::introspect::get_tables(pool, schemas).await;
 
     let mut query_root = Object::new("Query");
-    let mut builder = Schema::build("Query", None, None);
+    let mut mutation_root = Object::new("Mutation");
 
-    builder = builder.register(graphql::make_page_info_type());
+    // First pass: collect entity, query, and mutation artefacts per table.
+    struct TableArtefacts {
+        entity: Object,
+        query: crate::graphql::query::GeneratedQuery,
+        mutation: Option<crate::graphql::mutation::GeneratedMutation>,
+    }
+
+    let mut artefacts = Vec::new();
 
     for table in tables {
         if table.omit_read() {
@@ -105,21 +112,64 @@ pub(crate) async fn rebuild_schema(
 
         let table = Arc::new(table);
         let entity = graphql::generate_entity(table.clone());
-        let gq = graphql::generate_query(table, pool.clone());
+        let gq = graphql::generate_query(table.clone(), pool.clone());
+        let gm = if !table.omit_create() || !table.omit_update() || !table.omit_delete() {
+            Some(graphql::generate_mutation(table, pool.clone()))
+        } else {
+            None
+        };
 
-        query_root = query_root.field(gq.query_field);
+        artefacts.push(TableArtefacts {
+            entity,
+            query: gq,
+            mutation: gm,
+        });
+    }
+
+    let has_mutations = artefacts
+        .iter()
+        .any(|a| a.mutation.as_ref().is_some_and(|m| !m.fields.is_empty()));
+
+    let mut builder = Schema::build(
+        "Query",
+        if has_mutations {
+            Some("Mutation")
+        } else {
+            None
+        },
+        None,
+    );
+
+    builder = builder.register(graphql::make_page_info_type());
+
+    for a in artefacts {
+        query_root = query_root.field(a.query.query_field);
         builder = builder
-            .register(entity)
-            .register(gq.condition_type)
-            .register(gq.order_by_enum)
-            .register(gq.connection_type)
-            .register(gq.edge_type);
+            .register(a.entity)
+            .register(a.query.condition_type)
+            .register(a.query.order_by_enum)
+            .register(a.query.connection_type)
+            .register(a.query.edge_type);
 
-        for ft in gq.condition_filter_types {
+        for ft in a.query.condition_filter_types {
             builder = builder.register(ft);
+        }
+
+        if let Some(gm) = a.mutation {
+            for field in gm.fields {
+                mutation_root = mutation_root.field(field);
+            }
+            for input in gm.input_objects {
+                builder = builder.register(input);
+            }
         }
     }
 
-    let schema = builder.register(query_root).finish()?;
+    builder = builder.register(query_root);
+    if has_mutations {
+        builder = builder.register(mutation_root);
+    }
+
+    let schema = builder.finish()?;
     Ok(schema)
 }

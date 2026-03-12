@@ -4,4 +4,4 @@ pub mod row;
 pub(crate) mod transaction;
 pub(crate) mod watch;
 
-pub(crate) use row::JsonListExt;
+pub(crate) use row::{JsonExt, JsonListExt};

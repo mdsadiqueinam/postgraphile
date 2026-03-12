@@ -12,7 +12,7 @@ use super::super::type_mapping::to_sql_scalar;
 
 use crate::error::gql_err;
 
-pub(super) fn build_where_clause(
+pub(crate) fn build_where_clause(
     sql: &mut String,
     params: &mut Vec<SqlScalar>,
     pairs: Vec<(String, GqlValue)>,

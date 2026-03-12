@@ -72,6 +72,7 @@ pub struct Column {
     comment: String,
     r#type: Type,
     nullable: bool,
+    has_default: bool,
     omit: Omit,
 }
 
@@ -82,7 +83,8 @@ impl Column {
         let column_name = row.try_get::<_, String>(2).unwrap();
         let type_oid = row.try_get::<_, u32>(3).unwrap();
         let nullable = row.try_get::<_, bool>(4).unwrap();
-        let comment = row.try_get::<_, String>(5).unwrap_or("".to_string());
+        let has_default = row.try_get::<_, bool>(5).unwrap();
+        let comment = row.try_get::<_, String>(6).unwrap_or("".to_string());
         let data_type = Type::from_oid(type_oid).expect("Data type is not supported");
         let omit = Omit::new(&comment);
 
@@ -93,6 +95,7 @@ impl Column {
             comment,
             r#type: data_type,
             nullable,
+            has_default,
             omit,
         }
     }
@@ -128,6 +131,10 @@ impl Column {
     pub fn omit_delete(&self) -> bool {
         self.omit.delete
     }
+
+    pub fn has_default(&self) -> bool {
+        self.has_default
+    }
 }
 
 #[cfg(test)]
@@ -140,6 +147,7 @@ impl Column {
             comment: String::new(),
             r#type,
             nullable,
+            has_default: false,
             omit: Omit::for_test(omit_read),
         }
     }

@@ -14,7 +14,7 @@ use super::filter::{make_condition_filter_types, make_condition_type, make_order
 use super::sql_scalar::SqlScalar;
 
 mod executor;
-mod sql;
+pub(crate) mod sql;
 
 /// Everything the schema builder needs for one table.
 pub struct GeneratedQuery {

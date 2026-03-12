@@ -49,6 +49,7 @@ pub async fn get_tables(pool: &deadpool_postgres::Pool, schemas: &[String]) -> V
                 a.attname AS column_name, 
                 a.atttypid AS type_oid, 
                 NOT a.attnotnull AS nullable,
+                a.atthasdef AS has_default,
                 pg_catalog.col_description(a.attrelid, a.attnum) AS comment
             FROM 
                 pg_catalog.pg_attribute a
