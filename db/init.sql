@@ -114,3 +114,84 @@ INSERT INTO public.comments (post_id, author_id, body) VALUES
     (5, 1, 'Agreed, context matters a lot here.'),
     (8, 2, 'This is exactly what I needed to get started with Turbograph!'),
     (8, 3, 'Love how the schema is derived automatically.');
+
+-- ==============================================================
+-- RLS Setup
+-- ==============================================================
+
+-- 1. Create a non-superuser role
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'app_user') THEN
+        CREATE ROLE app_user;
+    END IF;
+END
+$$;
+
+-- 2. Revoke and Grant permissions
+-- First revoke all for each table for each user (app_user)
+REVOKE ALL ON TABLE public.users FROM app_user;
+REVOKE ALL ON TABLE public.posts FROM app_user;
+REVOKE ALL ON TABLE public.comments FROM app_user;
+
+-- Grant necessary schema usage
+GRANT USAGE ON SCHEMA public TO app_user;
+
+-- Grant permissions for RLS tables
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.users TO app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.posts TO app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.comments TO app_user;
+
+-- Grant permissions on sequences for serial IDs
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;
+
+-- 3. Enable RLS on tables
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.posts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.comments ENABLE ROW LEVEL SECURITY;
+
+-- 4. Define Policies
+
+-- USERS Policy
+-- Anyone can create, see. Only owner (id = app.current_user_id) can update/delete.
+CREATE POLICY users_policy ON public.users
+    FOR ALL
+    TO app_user
+    USING (true)
+    WITH CHECK (
+        id = current_setting('app.current_user_id', true)::integer
+    );
+
+-- Separate SELECT policy for users if needed, but since USING(true) is for ALL, anyone can see.
+-- Wait, FOR ALL with USING(true) means anyone can SELECT, but WITH CHECK only applies to INSERT/UPDATE.
+-- However, for DELETE, only USING applies. So we need to be more specific.
+
+DROP POLICY IF EXISTS users_policy ON public.users;
+
+CREATE POLICY users_select_policy ON public.users FOR SELECT TO app_user USING (true);
+CREATE POLICY users_insert_policy ON public.users FOR INSERT TO app_user WITH CHECK (true);
+CREATE POLICY users_update_policy ON public.users FOR UPDATE TO app_user 
+    USING (id = current_setting('app.current_user_id', true)::integer)
+    WITH CHECK (id = current_setting('app.current_user_id', true)::integer);
+CREATE POLICY users_delete_policy ON public.users FOR DELETE TO app_user 
+    USING (id = current_setting('app.current_user_id', true)::integer);
+
+-- POSTS Policy
+-- Anyone can create, see. author_id = app.current_user_id can update/delete.
+CREATE POLICY posts_select_policy ON public.posts FOR SELECT TO app_user USING (true);
+CREATE POLICY posts_insert_policy ON public.posts FOR INSERT TO app_user WITH CHECK (true);
+CREATE POLICY posts_update_policy ON public.posts FOR UPDATE TO app_user 
+    USING (author_id = current_setting('app.current_user_id', true)::integer)
+    WITH CHECK (author_id = current_setting('app.current_user_id', true)::integer);
+CREATE POLICY posts_delete_policy ON public.posts FOR DELETE TO app_user 
+    USING (author_id = current_setting('app.current_user_id', true)::integer);
+
+-- COMMENTS Policy
+-- Anyone can create, see. author_id = app.current_user_id can update/delete.
+CREATE POLICY comments_select_policy ON public.comments FOR SELECT TO app_user USING (true);
+CREATE POLICY comments_insert_policy ON public.comments FOR INSERT TO app_user WITH CHECK (true);
+CREATE POLICY comments_update_policy ON public.comments FOR UPDATE TO app_user 
+    USING (author_id = current_setting('app.current_user_id', true)::integer)
+    WITH CHECK (author_id = current_setting('app.current_user_id', true)::integer);
+CREATE POLICY comments_delete_policy ON public.comments FOR DELETE TO app_user 
+    USING (author_id = current_setting('app.current_user_id', true)::integer);

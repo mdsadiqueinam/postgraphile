@@ -15,7 +15,9 @@ pub(crate) async fn with_transaction<T>(
     tx_config: Option<TransactionConfig>,
     callback: impl for<'c> FnOnce(
         &'c tokio_postgres::Client,
-    ) -> Pin<Box<dyn Future<Output = Result<T, async_graphql::Error>> + Send + 'c>>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<T, async_graphql::Error>> + Send + 'c>,
+    >,
 ) -> Result<T, async_graphql::Error> {
     let client = pool
         .get()
