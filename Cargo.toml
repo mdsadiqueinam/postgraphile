@@ -5,6 +5,9 @@ members = [".", "examples/server"]
 name = "turbograph"
 version = "0.1.0"
 edition = "2024"
+description = "Automatic GraphQL API generation from PostgreSQL schemas in Rust"
+license = "MIT"
+readme = "README.md"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
