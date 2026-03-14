@@ -98,33 +98,44 @@ impl<M, O> Query<M, O> {
         }
     }
 
-    fn count_params(&self) -> Vec<&(dyn ToSql + Sync)> {
+    // Where-clause params only (no limit/offset)
+    fn where_params(&self) -> Vec<&(dyn ToSql + Sync)> {
         self.params
             .iter()
             .map(|p| p as &(dyn ToSql + Sync))
             .collect()
     }
+}
 
-    fn data_params(&self) -> Vec<&(dyn ToSql + Sync)> {
-        let mut params = self.count_params();
+// ── SELECT-only methods: limit, offset, execute ───────────────────────────────
+// These are intentionally NOT available on MutationMode.
 
+impl<O> Query<SelectMode, O> {
+    pub fn limit(mut self, limit: i32) -> Self {
+        self.limit = Some(SqlScalar::Int4(limit));
+        self
+    }
+
+    pub fn offset(mut self, offset: i32) -> Self {
+        self.offset = Some(SqlScalar::Int4(offset));
+        self
+    }
+
+    fn select_params(&self) -> Vec<&(dyn ToSql + Sync)> {
+        let mut params = self.where_params();
         if let Some(limit) = &self.limit {
             params.push(limit as &(dyn ToSql + Sync));
         }
-
         if let Some(offset) = &self.offset {
             params.push(offset as &(dyn ToSql + Sync));
         }
-
         params
     }
 
     fn get_count_query(&self) -> String {
         format!(
-            "{} COUNT(*) FROM {} {}",
-            StatementType::Select.as_str(),
-            self.table,
-            self.where_clause
+            "SELECT COUNT(*) FROM {} {}",
+            self.table, self.where_clause
         )
     }
 
@@ -132,88 +143,31 @@ impl<M, O> Query<M, O> {
         if self.orders.is_empty() {
             String::new()
         } else {
-            let order_strs: Vec<String> = self
+            let parts: Vec<String> = self
                 .orders
                 .iter()
-                .map(|(col, dir)| format!("{} {}", col, dir.as_str()))
+                .map(|(col, dir)| format!("{col} {}", dir.as_str()))
                 .collect();
-            format!(" ORDER BY {}", order_strs.join(", "))
+            format!(" ORDER BY {}", parts.join(", "))
         }
     }
 
-    fn get_data_query(&self) -> String {
-        let mut query = format!(
-            "{} * FROM {} {}",
-            self.statement_type.as_str(),
-            self.table,
-            self.where_clause
+    fn get_select_query(&self) -> String {
+        let mut q = format!(
+            "SELECT * FROM {} {}",
+            self.table, self.where_clause
         );
-
-        let order_clause = self.get_order_clause();
-
-        if !order_clause.is_empty() {
-            write!(query, " {order_clause}").unwrap();
+        let order = self.get_order_clause();
+        if !order.is_empty() {
+            write!(q, "{order}").unwrap();
         }
-
         if self.limit.is_some() {
-            write!(query, " LIMIT ${}", self.params.len() + 1).unwrap();
+            write!(q, " LIMIT ${}", self.params.len() + 1).unwrap();
         }
-
         if self.offset.is_some() {
-            write!(query, " OFFSET ${}", self.params.len() + 2).unwrap();
+            write!(q, " OFFSET ${}", self.params.len() + 2).unwrap();
         }
-
-        query
-    }
-
-    async fn execute_select_query(
-        &self,
-        client: &tokio_postgres::Client,
-    ) -> Result<(i64, Vec<serde_json::Value>), async_graphql::Error> {
-        let count_params = self.count_params();
-        let data_params = self.data_params();
-
-        let count_query = self.get_count_query();
-        let data_query = self.get_data_query();
-
-        let (count_row, data_rows) = tokio::try_join!(
-            client.query_one(&count_query, &count_params),
-            client.query(&data_query, &data_params),
-        )
-        .map_err(|e| format!("DB query error: {e}"))?;
-
-        let total_count: i64 = count_row.get(0);
-        let json_rows = data_rows.to_json_list();
-
-        Ok((total_count, json_rows))
-    }
-
-    async fn execute_mutation_query(
-        &self,
-        client: &tokio_postgres::Client,
-    ) -> Result<(), async_graphql::Error> {
-        let data_params = self.data_params();
-        let data_query = self.get_data_query();
-        client
-            .execute(&data_query, &data_params)
-            .await
-            .map_err(|e| format!("DB query error: {e}"))?;
-        // Implementation for mutation query execution
-        Ok(())
-    }
-}
-
-// ── execute is available in all states ────────────────────────────────────────
-
-impl<M, O> Query<M, O> {
-    pub fn limit(&mut self, limit: i32) -> &mut Self {
-        self.limit = Some(SqlScalar::Int4(limit));
-        self
-    }
-
-    pub fn offset(&mut self, offset: i32) -> &mut Self {
-        self.offset = Some(SqlScalar::Int4(offset));
-        self
+        q
     }
 
     pub async fn execute(
@@ -230,40 +184,96 @@ impl<M, O> Query<M, O> {
         client
             .batch_execute(&begin)
             .await
-            .map_err(|e| format!("BEGIN error: {e}"))?;
+            .map_err(|e| async_graphql::Error::new(format!("BEGIN error: {e}")))?;
 
         if let Some(cfg) = tx_config {
             apply_settings(&*client, cfg).await?;
         }
 
-        let result = match self.statement_type {
-            StatementType::Select => {
-                self.execute_select_query(&client)
-                    .await
-                    .map(|obj| QueryResult::Select {
-                        total_count: obj.0,
-                        rows: obj.1,
-                    })
-            }
-            _ => self
-                .execute_mutation_query(&client)
-                .await
-                .map(|_| QueryResult::Mutation),
-        };
+        let count_q = self.get_count_query();
+        let data_q = self.get_select_query();
+        let where_p = self.where_params();
+        let select_p = self.select_params();
+
+        let result = tokio::try_join!(
+            client.query_one(&count_q, &where_p),
+            client.query(&data_q, &select_p),
+        )
+        .map_err(|e| async_graphql::Error::new(format!("DB query error: {e}")));
 
         match &result {
             Ok(_) => {
                 client
                     .batch_execute("COMMIT")
                     .await
-                    .map_err(|e| format!("COMMIT error: {e}"))?;
+                    .map_err(|e| async_graphql::Error::new(format!("COMMIT error: {e}")))?;
             }
             Err(_) => {
                 let _ = client.batch_execute("ROLLBACK").await;
             }
         }
 
-        result
+        result.map(|(count_row, data_rows)| QueryResult::Select {
+            total_count: count_row.get(0),
+            rows: data_rows.to_json_list(),
+        })
+    }
+}
+
+// ── MUTATION-only methods: execute ────────────────────────────────────────────
+// limit, offset, order_by are intentionally NOT available here.
+
+impl Query<MutationMode, NoOrder> {
+    fn get_mutation_query(&self) -> String {
+        format!(
+            "{} FROM {} {}",
+            self.statement_type.as_str(),
+            self.table,
+            self.where_clause
+        )
+    }
+
+    pub async fn execute(
+        &self,
+        tx_config: &Option<TransactionConfig>,
+    ) -> Result<QueryResult, async_graphql::Error> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("Pool error: {e}")))?;
+
+        let begin = build_begin_statement(tx_config);
+        client
+            .batch_execute(&begin)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("BEGIN error: {e}")))?;
+
+        if let Some(cfg) = tx_config {
+            apply_settings(&*client, cfg).await?;
+        }
+
+        let query = self.get_mutation_query();
+        let params = self.where_params();
+
+        let result = client
+            .execute(&query, &params)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("DB query error: {e}")));
+
+        match &result {
+            Ok(_) => {
+                client
+                    .batch_execute("COMMIT")
+                    .await
+                    .map_err(|e| async_graphql::Error::new(format!("COMMIT error: {e}")))?;
+            }
+            Err(_) => {
+                let _ = client.batch_execute("ROLLBACK").await;
+            }
+        }
+
+        result.map(|_| QueryResult::Mutation)
     }
 }
 
@@ -331,7 +341,7 @@ impl Query<SelectMode, NoOrder> {
     }
 }
 
-impl Query<MutationMode, Ordered> {
+impl Query<MutationMode, NoOrder> {
     pub fn update(table: &str, pool: Pool) -> Self {
         Self::new(table.to_string(), StatementType::Update, pool)
     }
