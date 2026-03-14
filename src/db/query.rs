@@ -332,15 +332,15 @@ impl Query<SelectMode, NoOrder> {
 }
 
 impl Query<MutationMode, Ordered> {
-    pub fn update(table: String, pool: Pool) -> Self {
-        Self::new(table, StatementType::Update, pool)
+    pub fn update(table: &str, pool: Pool) -> Self {
+        Self::new(table.to_string(), StatementType::Update, pool)
     }
 
-    pub fn delete(table: String, pool: Pool) -> Self {
-        Self::new(table, StatementType::Delete, pool)
+    pub fn delete(table: &str, pool: Pool) -> Self {
+        Self::new(table.to_string(), StatementType::Delete, pool)
     }
 
-    pub fn insert(table: String, pool: Pool) -> Self {
-        Self::new(table, StatementType::Insert, pool)
+    pub fn insert(table: &str, pool: Pool) -> Self {
+        Self::new(table.to_string(), StatementType::Insert, pool)
     }
 }
