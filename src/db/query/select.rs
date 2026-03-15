@@ -2,6 +2,7 @@ use std::fmt::Write;
 use std::marker::PhantomData;
 
 use crate::TransactionConfig;
+use crate::db::error::DbError;
 use crate::db::JsonListExt;
 use deadpool_postgres::Pool;
 use tokio_postgres::types::ToSql;
@@ -176,22 +177,22 @@ impl<O> Select<O> {
 
     pub async fn execute(
         &self,
-        tx_config: &Option<TransactionConfig>,
-    ) -> Result<(i64, Vec<serde_json::Value>), async_graphql::Error> {
+        tx_config: Option<TransactionConfig>,
+    ) -> Result<(i64, Vec<serde_json::Value>), DbError> {
         let client = self
             .pool
             .get()
             .await
-            .map_err(|e| async_graphql::Error::new(format!("Pool error: {e}")))?;
+            .map_err(|e| DbError::Pool(e.to_string()))?;
 
-        let begin = build_begin_statement(tx_config);
+        let begin = build_begin_statement(&tx_config);
         client
             .batch_execute(&begin)
             .await
-            .map_err(|e| async_graphql::Error::new(format!("BEGIN error: {e}")))?;
+            .map_err(|e| DbError::Transaction(format!("BEGIN error: {e}")))?;
 
-        if let Some(cfg) = tx_config {
-            apply_settings(&*client, cfg).await?;
+        if let Some(ref cfg) = tx_config {
+            apply_settings(&*client, cfg).await.map_err(|e| DbError::Transaction(e.to_string()))?;
         }
 
         let count_q = self.get_count_query();
@@ -203,14 +204,14 @@ impl<O> Select<O> {
             client.query_one(&count_q, &where_p),
             client.query(&data_q, &select_p),
         )
-        .map_err(|e| async_graphql::Error::new(format!("DB query error: {e}")));
+        .map_err(|e| DbError::Query(e.to_string()));
 
         match &result {
             Ok(_) => {
                 client
                     .batch_execute("COMMIT")
                     .await
-                    .map_err(|e| async_graphql::Error::new(format!("COMMIT error: {e}")))?;
+                    .map_err(|e| DbError::Transaction(format!("COMMIT error: {e}")))?;
             }
             Err(_) => {
                 let _ = client.batch_execute("ROLLBACK").await;

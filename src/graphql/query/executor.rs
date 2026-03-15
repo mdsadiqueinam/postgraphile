@@ -2,13 +2,17 @@ use async_graphql::dynamic::FieldValue;
 use deadpool_postgres::Pool;
 use tokio_postgres::types::ToSql;
 
+use crate::db::error::DbError;
 use crate::db::JsonListExt;
 use crate::db::transaction::with_transaction;
-use crate::error::gql_err;
 use crate::models::transaction::TransactionConfig;
 
 use super::super::connection::{ConnectionPayload, EdgePayload, encode_cursor};
 use super::super::sql_scalar::SqlScalar;
+
+fn db_err_to_gql(err: DbError) -> async_graphql::Error {
+    async_graphql::Error::new(err.to_string())
+}
 
 pub(super) async fn execute_connection_query(
     pool: &Pool,
@@ -46,7 +50,7 @@ pub(super) async fn execute_connection_query(
                 client.query_one(&count_sql, &base_refs),
                 client.query(&data_sql, &data_refs),
             )
-            .map_err(|e| gql_err(format!("DB query error: {e}")))?;
+            .map_err(|e| DbError::Query(e.to_string()))?;
 
             let total_count: i64 = count_row.get(0);
             let json_rows = data_rows.to_json_list();
@@ -70,4 +74,5 @@ pub(super) async fn execute_connection_query(
         })
     })
     .await
+    .map_err(db_err_to_gql)
 }

@@ -4,7 +4,7 @@ use std::pin::Pin;
 
 use deadpool_postgres::Pool;
 
-use crate::error::gql_err;
+use crate::db::error::DbError;
 use crate::models::transaction::TransactionConfig;
 
 /// Acquires a pooled connection, wraps the callback in `BEGIN` / `COMMIT`, and
@@ -16,19 +16,19 @@ pub(crate) async fn with_transaction<T>(
     callback: impl for<'c> FnOnce(
         &'c tokio_postgres::Client,
     ) -> Pin<
-        Box<dyn Future<Output = Result<T, async_graphql::Error>> + Send + 'c>,
+        Box<dyn Future<Output = Result<T, DbError>> + Send + 'c>,
     >,
-) -> Result<T, async_graphql::Error> {
+) -> Result<T, DbError> {
     let client = pool
         .get()
         .await
-        .map_err(|e| gql_err(format!("Pool error: {e}")))?;
+        .map_err(|e| DbError::Pool(e.to_string()))?;
 
     let begin = build_begin_statement(&tx_config);
     client
         .batch_execute(&begin)
         .await
-        .map_err(|e| gql_err(format!("BEGIN error: {e}")))?;
+        .map_err(|e| DbError::Transaction(format!("BEGIN error: {e}")))?;
 
     if let Some(ref cfg) = tx_config {
         apply_settings(&*client, cfg).await?;
@@ -41,7 +41,7 @@ pub(crate) async fn with_transaction<T>(
             client
                 .batch_execute("COMMIT")
                 .await
-                .map_err(|e| gql_err(format!("COMMIT error: {e}")))?;
+                .map_err(|e| DbError::Transaction(format!("COMMIT error: {e}")))?;
         }
         Err(_) => {
             let _ = client.batch_execute("ROLLBACK").await;
@@ -79,19 +79,19 @@ pub(super) fn build_begin_statement(tx_config: &Option<TransactionConfig>) -> St
 pub(super) async fn apply_settings(
     client: &tokio_postgres::Client,
     cfg: &TransactionConfig,
-) -> Result<(), async_graphql::Error> {
+) -> Result<(), DbError> {
     if let Some(ref role) = cfg.role {
         client
             .query("SELECT set_config('role', $1, true)", &[role])
             .await
-            .map_err(|e| gql_err(format!("SET ROLE error: {e}")))?;
+            .map_err(|e| DbError::Transaction(format!("SET ROLE error: {e}")))?;
     }
 
     for (key, val) in &cfg.settings {
         client
             .query("SELECT set_config($1, $2, true)", &[key, val])
             .await
-            .map_err(|e| gql_err(format!("set_config error: {e}")))?;
+            .map_err(|e| DbError::Transaction(format!("set_config error: {e}")))?;
     }
 
     if let Some(secs) = cfg.timeout_seconds {
@@ -99,7 +99,7 @@ pub(super) async fn apply_settings(
         client
             .query("SELECT set_config('statement_timeout', $1, true)", &[&ms])
             .await
-            .map_err(|e| gql_err(format!("SET timeout error: {e}")))?;
+            .map_err(|e| DbError::Transaction(format!("SET timeout error: {e}")))?;
     }
 
     Ok(())

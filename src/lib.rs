@@ -5,6 +5,7 @@ mod models;
 mod schema;
 mod utils;
 
+pub use db::error::DbError;
 pub use models::config::{Config, PoolConfig};
 pub use models::transaction::{TransactionConfig, TransactionSettingsValue};
 pub use schema::TurboGraph;

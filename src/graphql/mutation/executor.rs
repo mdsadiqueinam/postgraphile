@@ -6,15 +6,19 @@ use async_graphql::dynamic::FieldValue;
 use deadpool_postgres::Pool;
 use tokio_postgres::types::ToSql;
 
+use crate::db::error::DbError;
 use crate::db::{JsonExt, JsonListExt};
 use crate::db::transaction::with_transaction;
-use crate::error::gql_err;
 use crate::models::table::Column;
 use crate::models::transaction::TransactionConfig;
 
 use super::super::query::sql::build_where_clause;
 use super::super::sql_scalar::SqlScalar;
 use super::super::type_mapping::to_sql_scalar;
+
+fn db_err_to_gql(err: DbError) -> async_graphql::Error {
+    async_graphql::Error::new(err.to_string())
+}
 
 /// INSERT … RETURNING *  →  single entity (or null if no columns provided).
 pub(super) async fn execute_create(
@@ -43,7 +47,7 @@ pub(super) async fn execute_create(
     }
 
     if col_parts.is_empty() {
-        return Err(gql_err("No valid columns provided for insert"));
+        return Err(async_graphql::Error::new("No valid columns provided for insert"));
     }
 
     let sql = format!(
@@ -62,12 +66,13 @@ pub(super) async fn execute_create(
             let row = client
                 .query_one(&sql, &refs)
                 .await
-                .map_err(|e| gql_err(format!("INSERT error: {e}")))?;
+                .map_err(|e| DbError::Query(format!("INSERT error: {e}")))?;
 
             Ok(Some(FieldValue::owned_any(row.to_json())))
         })
     })
     .await
+    .map_err(db_err_to_gql)
 }
 
 /// UPDATE … SET … WHERE … RETURNING *  →  list of updated entities.
@@ -101,7 +106,7 @@ pub(super) async fn execute_update(
     }
 
     if set_parts.is_empty() {
-        return Err(gql_err("No valid columns provided for update"));
+        return Err(async_graphql::Error::new("No valid columns provided for update"));
     }
 
     // Build WHERE clause — params continue numbering from $M+1
@@ -127,7 +132,7 @@ pub(super) async fn execute_update(
             let rows = client
                 .query(&sql, &refs)
                 .await
-                .map_err(|e| gql_err(format!("UPDATE error: {e}")))?;
+                .map_err(|e| DbError::Query(format!("UPDATE error: {e}")))?;
 
             let list: Vec<FieldValue> = rows
                 .to_json_list()
@@ -139,6 +144,7 @@ pub(super) async fn execute_update(
         })
     })
     .await
+    .map_err(db_err_to_gql)
 }
 
 /// DELETE … WHERE … RETURNING *  →  list of deleted entities.
@@ -170,7 +176,7 @@ pub(super) async fn execute_delete(
             let rows = client
                 .query(&sql, &refs)
                 .await
-                .map_err(|e| gql_err(format!("DELETE error: {e}")))?;
+                .map_err(|e| DbError::Query(format!("DELETE error: {e}")))?;
 
             let list: Vec<FieldValue> = rows
                 .to_json_list()
@@ -182,4 +188,5 @@ pub(super) async fn execute_delete(
         })
     })
     .await
+    .map_err(db_err_to_gql)
 }

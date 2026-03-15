@@ -1,3 +1,4 @@
+pub mod error;
 pub mod introspect;
 pub(crate) mod operator;
 pub(crate) mod pool;

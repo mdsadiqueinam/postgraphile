@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use crate::TransactionConfig;
+use crate::db::error::DbError;
 use deadpool_postgres::Pool;
 use tokio_postgres::types::ToSql;
 
@@ -96,22 +97,22 @@ impl Update {
 
     pub async fn execute(
         &self,
-        tx_config: &Option<TransactionConfig>,
-    ) -> Result<u64, async_graphql::Error> {
+        tx_config: Option<TransactionConfig>,
+    ) -> Result<u64, DbError> {
         let client = self
             .pool
             .get()
             .await
-            .map_err(|e| async_graphql::Error::new(format!("Pool error: {e}")))?;
+            .map_err(|e| DbError::Pool(e.to_string()))?;
 
-        let begin = build_begin_statement(tx_config);
+        let begin = build_begin_statement(&tx_config);
         client
             .batch_execute(&begin)
             .await
-            .map_err(|e| async_graphql::Error::new(format!("BEGIN error: {e}")))?;
+            .map_err(|e| DbError::Transaction(format!("BEGIN error: {e}")))?;
 
-        if let Some(cfg) = tx_config {
-            apply_settings(&*client, cfg).await?;
+        if let Some(ref cfg) = tx_config {
+            apply_settings(&*client, cfg).await.map_err(|e| DbError::Transaction(e.to_string()))?;
         }
 
         let query = self.get_query();
@@ -120,14 +121,14 @@ impl Update {
         let result = client
             .execute(&query, &params)
             .await
-            .map_err(|e| async_graphql::Error::new(format!("DB query error: {e}")));
+            .map_err(|e| DbError::Query(e.to_string()));
 
         match &result {
             Ok(_) => {
                 client
                     .batch_execute("COMMIT")
                     .await
-                    .map_err(|e| async_graphql::Error::new(format!("COMMIT error: {e}")))?;
+                    .map_err(|e| DbError::Transaction(format!("COMMIT error: {e}")))?;
             }
             Err(_) => {
                 let _ = client.batch_execute("ROLLBACK").await;
